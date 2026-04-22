@@ -1,0 +1,24 @@
+{
+  "name": "custom-methods",
+  "version": "1.0.0",
+  "description": "custom-methods",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sourabh2914-gif/custom-methods.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/sourabh2914-gif/custom-methods/issues"
+  },
+  "homepage": "https://github.com/sourabh2914-gif/custom-methods#readme",
+  "dependencies": {
+    "@playwright/mcp": "^0.0.70"
+  }
+}
