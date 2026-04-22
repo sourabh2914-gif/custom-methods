@@ -19,5 +19,5 @@ export async function splitText(ctx: WalnutContext) {
   const parts = text.split(delimiter);
   ctx.log(`Split "${text}" by "${delimiter}" → ${parts.length} part(s): ${JSON.stringify(parts)}`);
 
-  ctx.setVariable(outputVar, parts);
+  ctx.setVariable(outputVar, parts[1]);
 }
