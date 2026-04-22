@@ -18,9 +18,14 @@ export async function generateRandomNumeric(ctx: WalnutContext) {
   const suffix = ctx.args[2] || '';
   const outputVar = ctx.args[3];
 
-  const min = Math.pow(10, count - 1);
-  const max = Math.pow(10, count) - 1;
-  const randomNum = Math.floor(Math.random() * (max - min + 1)) + min;
+  // Generate exactly `count` random digits (first digit is 1-9 to avoid leading zero)
+  let randomNum = '';
+  for (let i = 0; i < count; i++) {
+    const digit = i === 0
+      ? Math.floor(Math.random() * 9) + 1   // 1–9 for first digit
+      : Math.floor(Math.random() * 10);      // 0–9 for remaining digits
+    randomNum += digit;
+  }
 
   const result = `${prefix}${randomNum}${suffix}`;
   ctx.log(`Generated random numeric: "${result}" (count: ${count}, prefix: "${prefix}", suffix: "${suffix}")`);
