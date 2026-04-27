@@ -10,7 +10,9 @@ import type { WalnutContext, WalnutWebContext } from './walnut';
  */
 export async function enterOtpFields(ctx: WalnutContext) {
   // ctx.args[0] = "otp_code" (from $[otp_code]) — runtime variable name holding the OTP string
-  const otp = ctx.getVariable(ctx.args[0]);
+  const otp = String(ctx.getVariable(ctx.args[0]));
+
+  ctx.log(`OTP in enter OTP method ###############: "${otp}"`);
 
   const xPath = ctx.getVariable(ctx.args[1]);
 
