@@ -24,6 +24,6 @@ export async function readOtpFromText(ctx: WalnutContext) {
   }
 
   const otp = match[1];
-  ctx.log(`Extracted OTP: "${otp}"`);
+  ctx.log(`Extracted OTP=======================================================: "${otp}"`);
   ctx.setVariable(outputVar, otp);
 }
