@@ -12,6 +12,7 @@ export async function readOtpFromText(ctx: WalnutContext) {
   // ctx.args[0] = "textMessage" (from $[textMessage]) — runtime variable name holding the full email/SMS content
   // ctx.args[1] = "otp_code" (from $[otp_code]) — runtime variable name to store the extracted OTP
   const textMessage = ctx.getVariable(ctx.args[0]);
+  ctx.log(`TEXT MESSAGE=======================: '${String(textMessage)}`);
   const outputVar = ctx.args[1];
 
   if (!textMessage) {
