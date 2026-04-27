@@ -47,6 +47,7 @@ export async function enterOtpFields(ctx: WalnutContext) {
 
     // Get the nth input field by index
     const field = webCtx.page.locator(xPath+'['+(i+1)+']');
+    ctx.log(`EACH OTP FIELD IS: "${field}"`)
 
     // Click to focus, then fill with the single digit
     await field.click();
