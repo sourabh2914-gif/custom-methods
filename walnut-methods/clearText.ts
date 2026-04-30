@@ -1,21 +1,16 @@
-import type { WalnutContext, WalnutWebContext } from './walnut';
-
+import type { WalnutContext } from './walnut';
+ 
 /** @walnut_method
- * name: Clear Text
- * description: Clear text from input field
- * actionType: custom_clear_text
- * context: web
- * needsLocator: true
- * category: Forms
- */
-export async function clearText(ctx: WalnutContext) {
-  const webCtx = ctx as WalnutWebContext;
-
-  // ctx.locator is the XPath from the step-linked object
-  // Use ctx.click + page.keyboard to reliably clear — same pattern as getTextAndStore/getPropertyAndStore
-  await ctx.click(ctx.locator);
-  await webCtx.page.keyboard.press('Control+A');
-  await webCtx.page.keyboard.press('Backspace');
-
-  ctx.log('Cleared text from element: "' + ctx.locator + '"');
+* name: Clear Text From Object
+* description: Clear text from the linked object
+* actionType: custom_clear_text_from_object
+* context: web
+* needsLocator: true
+* category: Forms
+*/
+export async function clearTextFromObject(ctx: WalnutContext) {
+  if (ctx.platform !== 'web') return;
+  const locator = (ctx as any).locator;
+  if (!locator) throw new Error('No object linked to this step — attach an object in the test case editor');
+  await locator.clear();
 }
