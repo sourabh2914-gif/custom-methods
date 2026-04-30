@@ -1,4 +1,4 @@
-import type { WalnutContext } from './walnut';
+import type { WalnutContext, WalnutWebContext } from './walnut';
 
 /** @walnut_method
  * name: Clear Text
@@ -8,7 +8,7 @@ import type { WalnutContext } from './walnut';
  * needsLocator: false
  * category: Forms
  */
-export async function clearText(ctx: WalnutContext) {
+export async function clearText(ctx: WalnutWebContext) {
   const selector = ctx.args[0];
 
   // Wait for element to be visible and attached before interacting
