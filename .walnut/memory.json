@@ -1,3 +1,4 @@
 [
-  "user correction: clearText selector comes from the step-linked object (XPath), NOT from test data"
+  "user correction: clearText selector comes from the step-linked object (XPath), NOT from test data",
+  "[DB] username: s"
 ]
