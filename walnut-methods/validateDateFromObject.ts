@@ -12,31 +12,66 @@ export async function validateDateFromObject(ctx: WalnutContext) {
   const c = ctx as any;
   const locator = c.locator;
 
-  // ctx.args[0] = "expectedDate" (from $[expectedDate]) — runtime variable holding the stored ISO date e.g. "1990-05-15"
-  const expectedIso = c.getVariable(c.args[0]);
+  // ctx.args[0] = "dob" (from $[dob]) — runtime variable holding the stored date
+  const storedDate = String(c.getVariable(c.args[0])).trim();
 
-  if (!expectedIso) {
+  if (!storedDate || storedDate === 'undefined') {
     throw new Error(`Runtime variable "$[${c.args[0]}]" is empty — capture the date in a prior step first.`);
   }
 
-  // Convert ISO "YYYY-MM-DD" → "DD-MM-YYYY" to match the read-only display format
-  const [year, month, day] = String(expectedIso).split('-');
-  const expectedFormatted = `${day}-${month}-${year}`;
+  c.log(`Stored date value: "${storedDate}"`);
 
-  // Read displayed text — handle both string selector and Playwright Locator object
-  let actualText: string;
-  if (typeof locator === 'string') {
-    actualText = (await c.getText(locator)).trim();
+  // Normalise stored date to DD-MM-YYYY regardless of input format:
+  // Handles "05/15/1990" (MM/DD/YYYY) and "1990-05-15" (YYYY-MM-DD)
+  let expectedFormatted: string;
+  if (storedDate.includes('/')) {
+    // MM/DD/YYYY → DD-MM-YYYY
+    const [mm, dd, yyyy] = storedDate.split('/');
+    expectedFormatted = `${dd}-${mm}-${yyyy}`;
+  } else if (storedDate.includes('-') && storedDate.indexOf('-') === 4) {
+    // YYYY-MM-DD → DD-MM-YYYY
+    const [yyyy, mm, dd] = storedDate.split('-');
+    expectedFormatted = `${dd}-${mm}-${yyyy}`;
   } else {
-    actualText = (await locator.textContent() ?? '').trim();
+    // Already in DD-MM-YYYY or unknown — use as-is
+    expectedFormatted = storedDate;
   }
 
   c.log(`Expected date (formatted): "${expectedFormatted}"`);
-  c.log(`Actual date on screen:     "${actualText}"`);
 
-  if (actualText !== expectedFormatted) {
-    throw new Error(`Date mismatch — expected "${expectedFormatted}" but found "${actualText}"`);
+  // Read actual value from the read-only date field
+  // Input fields store date as value attribute, not textContent — try inputValue() first
+  let actualText: string = '';
+  if (typeof locator === 'string') {
+    actualText = (await c.getInputValue(locator)).trim();
+  } else {
+    // Playwright Locator object — try inputValue(), fall back to textContent()
+    try {
+      actualText = (await locator.inputValue()).trim();
+    } catch (_) {
+      actualText = (await locator.textContent() ?? '').trim();
+    }
   }
 
-  c.log(`Date validation passed: "${actualText}"`);
+  c.log(`Actual date on screen: "${actualText}"`);
+
+  // Normalise actual text the same way for fair comparison
+  let actualFormatted: string;
+  if (actualText.includes('/')) {
+    const [mm, dd, yyyy] = actualText.split('/');
+    actualFormatted = `${dd}-${mm}-${yyyy}`;
+  } else if (actualText.includes('-') && actualText.indexOf('-') === 4) {
+    const [yyyy, mm, dd] = actualText.split('-');
+    actualFormatted = `${dd}-${mm}-${yyyy}`;
+  } else {
+    actualFormatted = actualText;
+  }
+
+  c.log(`Actual date (formatted): "${actualFormatted}"`);
+
+  if (actualFormatted !== expectedFormatted) {
+    throw new Error(`Date mismatch — expected "${expectedFormatted}" but found "${actualFormatted}"`);
+  }
+
+  c.log(`Date validation passed: "${actualFormatted}"`);
 }
