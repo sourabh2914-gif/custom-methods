@@ -2,5 +2,6 @@
   "user correction: clearText selector comes from the step-linked object (XPath), NOT from test data",
   "[DB] username: s",
   "registered custom handlers: custom_clear_text_from_object, custom_click_element_by_xpath, custom_enter_otp_fields, custom_generate_random_alphabets, custom_generate_random_alphanumeric, custom_generate_random_numeric, custom_get_date, custom_get_property_and_store, custom_get_text_and_store, custom_read_otp_from_text, custom_refresh_browser, custom_select_date_picker, custom_split_text, custom_validate_partial_text, custom_wait_for_element_absent",
-  "custom method custom_capture_dob_from_ui is NOT registered"
+  "custom method custom_capture_dob_from_ui is NOT registered",
+  "[SCHEMA] 'still' EXISTS (user corrected)"
 ]
