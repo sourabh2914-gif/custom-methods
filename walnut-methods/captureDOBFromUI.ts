@@ -8,19 +8,19 @@ import type { WalnutContext } from './walnut';
  * needsLocator: true
  * category: Forms
  */
-export async function captureDOBFromUI(ctx: WalnutContext) {
+export async function captureDobFromUi(ctx: WalnutContext) {
   // ctx.locator — XPath from the step-linked DOB input object
-  // ctx.args[0] = "dob" (from $[dob]) — runtime variable name to store the value into
+  // ctx.args[0] = "dob" (from $[dob]) — runtime variable name to store into
 
   const outputVar = ctx.args[0];
 
-  // DOB input stores its value as an HTML attribute: value="2026-04-21"
+  // Date input stores value as ISO format: value="1990-05-15"
   const dob = await ctx.getAttribute(ctx.locator, 'value');
 
   if (!dob) {
-    throw new Error('DOB value is empty — ensure the date input has a selected value before this step.');
+    throw new Error('DOB value is empty — ensure the date input has a value before this step.');
   }
 
-  ctx.log(`Captured DOB: "${dob}"`);
+  ctx.log(`Captured DOB (ISO): "${dob}"`);
   ctx.setVariable(outputVar, dob);
 }
