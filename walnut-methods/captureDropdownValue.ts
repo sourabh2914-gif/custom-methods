@@ -60,6 +60,14 @@ export async function captureDropdownValue(ctx: WalnutContext) {
     throw new Error('Dropdown value is empty — ensure the dropdown has a selected value before this step.');
   }
 
-  c.log(`Captured dropdown value: "${value}"`);
-  c.setVariable(outputVar, value);
+  // Strip UI symbols (×, ✕, ✗, ×, close-button chars) that appear in multi-select tag chips.
+  // Keep only printable word characters, spaces, parentheses, hyphens, commas, dots, and slashes.
+  const cleaned = value
+    .replace(/[^\w\s().,''\-\/]/gu, '')  // remove symbols like × ✕ ✗ etc.
+    .replace(/\s+/g, ' ')               // collapse multiple spaces
+    .trim();
+
+  c.log(`Captured dropdown value (raw):     "${value}"`);
+  c.log(`Captured dropdown value (cleaned): "${cleaned}"`);
+  c.setVariable(outputVar, cleaned);
 }

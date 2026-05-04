@@ -20,15 +20,22 @@ export async function validateDropdownFromObject(ctx: WalnutContext) {
   }
 
   // Read-only dropdowns render as plain text — handle both string selector and Playwright Locator object
-  let actualText: string;
+  let rawText: string;
   if (typeof locator === 'string') {
-    actualText = (await c.getText(locator)).trim();
+    rawText = (await c.getText(locator)).trim();
   } else {
-    actualText = (await locator.textContent() ?? '').trim();
+    rawText = (await locator.textContent() ?? '').trim();
   }
 
+  // Strip UI symbols (×, ✕, ✗, close-button chars) from multi-select tag chips
+  const actualText = rawText
+    .replace(/[^\w\s().,''\-\/]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
   c.log(`Expected dropdown value: "${expectedValue}"`);
-  c.log(`Actual dropdown value:   "${actualText}"`);
+  c.log(`Actual dropdown value (raw):     "${rawText}"`);
+  c.log(`Actual dropdown value (cleaned): "${actualText}")`);
 
   if (actualText !== expectedValue) {
     throw new Error(`Dropdown mismatch — expected "${expectedValue}" but found "${actualText}"`);
