@@ -9,11 +9,29 @@ import type { WalnutContext } from './walnut';
  * category: Query
  */
 export async function getTextAndStore(ctx: WalnutContext) {
-  // ctx.args[0] = "result" (from $[result]) — runtime variable name to store into
-  const outputVar = ctx.args[0];
+  const c = ctx as any;
+  const outputVar = c.args[0];
+  const locator = c.locator;
 
-  const text = await ctx.getText(ctx.locator);
-  ctx.log(`Got text: "${text}"`);
+  let text = '';
 
-  ctx.setVariable(outputVar, text);
+  if (typeof locator === 'string') {
+    // String XPath/CSS selector — ctx.getText() accepts a string
+    try { text = (await c.getText(locator) ?? '').trim(); } catch (_) {}
+    if (!text) {
+      try { text = (await c.getInputValue(locator) ?? '').trim(); } catch (_) {}
+    }
+  } else {
+    // Playwright Locator object — call methods directly on it
+    try { text = (await locator.innerText() ?? '').trim(); } catch (_) {}
+    if (!text) {
+      try { text = (await locator.textContent() ?? '').trim(); } catch (_) {}
+    }
+    if (!text) {
+      try { text = (await locator.inputValue() ?? '').trim(); } catch (_) {}
+    }
+  }
+
+  c.log(`Got text: "${text}"`);
+  c.setVariable(outputVar, text);
 }
