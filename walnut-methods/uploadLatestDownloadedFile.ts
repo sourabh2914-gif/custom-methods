@@ -43,9 +43,20 @@ export async function uploadLatestDownloadedFile(ctx: WalnutContext) {
 
   ctx.log('Latest downloaded file: ' + latestFile);
 
-  // Upload the file to the specified input element
   const webCtx = ctx as WalnutWebContext;
-  await webCtx.fileUpload(selector, latestFile);
 
-  ctx.log('File uploaded successfully to selector: ' + selector);
+  // Intercept the file chooser BEFORE clicking the upload area.
+  // This bypasses the OS file explorer dialog entirely.
+  const [fileChooser] = await Promise.all([
+    webCtx.page.waitForEvent('filechooser'),
+    webCtx.page.locator(
+      selector.startsWith('//') || selector.startsWith('xpath=')
+        ? 'xpath=' + selector.replace(/^xpath=/, '')
+        : selector
+    ).click(),
+  ]);
+
+  await fileChooser.setFiles(latestFile);
+
+  ctx.log('File uploaded successfully via file chooser: ' + latestFile);
 }
