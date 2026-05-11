@@ -20,9 +20,14 @@ export async function scrollUntilVisible(ctx: WalnutContext) {
   if (!containerXpath) throw new Error('No container XPath provided — pass the scrollable container XPath as the first argument');
   if (!targetXpath) throw new Error('No target XPath provided — pass the target element XPath as the second argument');
 
-  // Resolve any {{variable}} placeholders in both XPaths
-  const resolvedContainer: string = c.replacePlaceholders(containerXpath);
-  const resolvedTarget: string = c.replacePlaceholders(targetXpath);
+  // Resolve {{variable}} placeholders and $[runtimeVar] variables in both XPaths
+  const resolveRuntimeVars = (text: string): string =>
+    text.replace(/\$\[([^\]]+)\]/g, (_: string, name: string) => {
+      const val = c.getVariable(name);
+      return (val !== undefined && val !== null) ? String(val) : '';
+    });
+  const resolvedContainer: string = resolveRuntimeVars(c.replacePlaceholders(containerXpath));
+  const resolvedTarget: string = resolveRuntimeVars(c.replacePlaceholders(targetXpath));
 
   c.log(`Container XPath: ${resolvedContainer}`);
   c.log(`Target XPath: ${resolvedTarget}`);
