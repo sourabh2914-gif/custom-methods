@@ -2,71 +2,69 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Scroll Until Element Visible
- * description: Scroll the page until the linked object becomes visible
+ * description: Scroll the page until element with xpath ${xpath} is present
  * actionType: custom_scroll_until_visible
  * context: web
- * needsLocator: true
+ * needsLocator: false
  * category: Navigation
  */
 export async function scrollUntilVisible(ctx: WalnutContext) {
   if (ctx.platform !== 'web') return;
   const c = ctx as any;
-  const locator = c.locator;
 
-  if (!locator) throw new Error('No object linked to this step — attach an object in the test case editor');
+  // args[0] = xpath from ${xpath} in description
+  const xpath = c.args[0];
+  if (!xpath) throw new Error('No XPath provided — pass the element XPath as the first argument');
 
-  // Fix #2: initialize lastHeight from the actual page height, not -1
   let lastHeight: number = await c.page.evaluate(() => document.body.scrollHeight);
 
   while (true) {
-    // Check if element is attached to DOM first (presence), then visibility
-    try {
-      const count: number = typeof locator === 'string'
-        ? await c.count(locator)
-        : await locator.count();
+    // Check if element is present in DOM using XPath
+    const count: number = await c.page.evaluate((xp: string) => {
+      return document.evaluate(xp, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength;
+    }, xpath).catch(() => 0);
 
-      if (count > 0) {
-        // Element is present in DOM — now ensure it's in view
-        c.log('Element is present in DOM, scrolling into view');
-        if (typeof locator !== 'string') {
-          await locator.scrollIntoViewIfNeeded();
-        }
-        return;
-      }
-    } catch (_) {
-      // Element not yet in DOM — keep scrolling
+    if (count > 0) {
+      c.log(`Element found (${count} match(es)), scrolling into view`);
+      // Scroll the element into view via JS
+      await c.page.evaluate((xp: string) => {
+        const el = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue as HTMLElement;
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, xpath);
+      return;
     }
 
-    // Scroll to the current bottom to trigger lazy load
+    // Scroll to current bottom to trigger lazy load
     await c.page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
 
-    // Fix #1: wait only for height to grow, not readyState (which is always 'complete')
+    // Wait for new content to load (height increase) — browser drives the timing
     await c.page.waitForFunction(
       (prevHeight: number) => document.body.scrollHeight > prevHeight,
       lastHeight,
       { timeout: 5000 }
     ).catch(() => {
-      // No new content loaded within 5s — page bottom reached
+      // No height change within 5s — page bottom reached
     });
 
     const newHeight: number = await c.page.evaluate(() => document.body.scrollHeight);
     c.log(`Scrolled — height before: ${lastHeight}px, height after: ${newHeight}px`);
 
     if (newHeight === lastHeight) {
-      // Page height hasn't grown — truly at the bottom, do a final presence check
-      const finalCount: number = typeof locator === 'string'
-        ? await c.count(locator).catch(() => 0)
-        : await locator.count().catch(() => 0);
+      // Truly at the bottom — final presence check
+      const finalCount: number = await c.page.evaluate((xp: string) => {
+        return document.evaluate(xp, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength;
+      }, xpath).catch(() => 0);
 
       if (finalCount > 0) {
-        c.log('Element found after reaching page bottom');
-        if (typeof locator !== 'string') {
-          await locator.scrollIntoViewIfNeeded();
-        }
+        c.log('Element found after reaching page bottom, scrolling into view');
+        await c.page.evaluate((xp: string) => {
+          const el = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue as HTMLElement;
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, xpath);
         return;
       }
 
-      throw new Error('Reached the end of the page but the element was not found.');
+      throw new Error(`Reached the end of the page but element with XPath "${xpath}" was not found.`);
     }
 
     lastHeight = newHeight;
