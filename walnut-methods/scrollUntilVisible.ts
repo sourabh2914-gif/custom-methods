@@ -12,9 +12,11 @@ export async function scrollUntilVisible(ctx: WalnutContext) {
   if (ctx.platform !== 'web') return;
   const c = ctx as any;
 
-  // args[0] = XPath of the target element to scroll to
-  const targetXpath: string = c.args[0];
-  if (!targetXpath) throw new Error('No target XPath provided');
+  // args[0] = XPath of the target element
+  // Note: if old step config still passes two args, targetXpath may land in args[0] or args[1]
+  // Try args[0] first, fall back to args[1] for backwards compatibility
+  const rawTarget: string = c.args[0] || c.args[1];
+  if (!rawTarget) throw new Error('No target XPath provided — set the targetXpath argument in the step');
 
   // Resolve {{variable}} placeholders and $[runtimeVar] variables
   const resolveRuntimeVars = (text: string): string =>
@@ -22,34 +24,63 @@ export async function scrollUntilVisible(ctx: WalnutContext) {
       const val = c.getVariable(name);
       return (val !== undefined && val !== null) ? String(val) : '';
     });
-  const resolvedTarget: string = resolveRuntimeVars(c.replacePlaceholders(targetXpath));
+  const resolvedTarget: string = resolveRuntimeVars(c.replacePlaceholders(rawTarget));
 
-  c.log(`Looking for element: ${resolvedTarget}`);
+  c.log(`Target XPath: ${resolvedTarget}`);
 
-  // Check element is in DOM (all 200+ rows are already rendered, just off-screen)
-  const found: boolean = await c.page.evaluate((xp: string) => {
-    try {
-      const el = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-      return !!el;
-    } catch (_) { return false; }
-  }, resolvedTarget);
+  // Helper — check if element exists in DOM via XPath
+  const isInDOM = (): Promise<boolean> =>
+    c.page.evaluate((xp: string) => {
+      try {
+        const el = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+        return !!el;
+      } catch (_) { return false; }
+    }, resolvedTarget);
 
-  if (!found) throw new Error(`Element not found in DOM — XPath may be incorrect.\nXPath: "${resolvedTarget}"`);
+  // Check if already in DOM before scrolling
+  if (await isInDOM()) {
+    c.log('Element already in DOM, scrolling into view');
+    await c.page.evaluate((xp: string) => {
+      const el = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue as HTMLElement;
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, resolvedTarget);
+    return;
+  }
 
-  // Element is in DOM — scroll it into view directly
-  c.log('Element found in DOM, scrolling into view');
-  await c.page.evaluate((xp: string) => {
-    const el = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue as HTMLElement;
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  }, resolvedTarget);
+  // Element not yet in DOM — scroll page to trigger lazy loading
+  let lastHeight: number = await c.page.evaluate(() => document.body.scrollHeight);
 
-  // Wait until element is actually visible in viewport
-  await c.page.waitForFunction((xp: string) => {
-    const el = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue as HTMLElement;
-    if (!el) return false;
-    const rect = el.getBoundingClientRect();
-    return rect.top >= 0 && rect.bottom <= window.innerHeight;
-  }, resolvedTarget, { timeout: 10000 });
+  while (true) {
+    // Scroll page to current bottom to trigger next batch of lazy load
+    await c.page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
 
-  c.log('Element is now visible in viewport');
+    // Wait for page height to grow (new rows loaded) — no hardcoded pause
+    await c.page.waitForFunction(
+      (prev: number) => document.body.scrollHeight > prev,
+      lastHeight,
+      { timeout: 5000 }
+    ).catch(() => {
+      // No height change — page bottom reached, no more lazy content
+    });
+
+    const newHeight: number = await c.page.evaluate(() => document.body.scrollHeight);
+    c.log(`Page height: ${lastHeight}px → ${newHeight}px`);
+
+    // Check if target appeared after this scroll/load
+    if (await isInDOM()) {
+      c.log('Element found after scrolling, bringing into view');
+      await c.page.evaluate((xp: string) => {
+        const el = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue as HTMLElement;
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, resolvedTarget);
+      return;
+    }
+
+    if (newHeight === lastHeight) {
+      // Page stopped growing and element still not found
+      throw new Error(`Reached the end of the page but element was not found.\nXPath: "${resolvedTarget}"`);
+    }
+
+    lastHeight = newHeight;
+  }
 }
