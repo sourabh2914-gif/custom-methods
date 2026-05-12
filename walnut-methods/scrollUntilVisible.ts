@@ -2,7 +2,7 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Scroll Until Element Visible
- * description: Scroll the page until element ${targetXpath} is present
+ * description: Scroll inside container ${containerXpath} until element ${targetXpath} is present
  * actionType: custom_scroll_until_visible
  * context: web
  * needsLocator: false
@@ -12,12 +12,15 @@ export async function scrollUntilVisible(ctx: WalnutContext) {
   if (ctx.platform !== 'web') return;
   const c = ctx as any;
 
-  // args[0] = XPath of the target element
-  // args[1] fallback for old 2-arg step configs
-  const rawTarget: string = c.args[0] || c.args[1];
-  if (!rawTarget) throw new Error('No target XPath provided');
+  // args[0] = XPath of the scrollable container
+  // args[1] = XPath of the target element to find
+  const rawContainer: string = c.args[0];
+  const rawTarget: string = c.args[1];
 
-  // Resolve {{variable}} and $[runtimeVar] in the XPath
+  if (!rawContainer) throw new Error('No container XPath provided — pass the scrollable container XPath as the first argument');
+  if (!rawTarget) throw new Error('No target XPath provided — pass the target element XPath as the second argument');
+
+  // Resolve {{variable}} and $[runtimeVar] in both XPaths
   const resolveAll = (text: string): string => {
     const withPlaceholders = c.replacePlaceholders(text);
     return withPlaceholders.replace(/\$\[([^\]]+)\]/g, (_: string, name: string) => {
@@ -26,8 +29,11 @@ export async function scrollUntilVisible(ctx: WalnutContext) {
     });
   };
 
+  const resolvedContainer: string = resolveAll(rawContainer);
   const resolvedTarget: string = resolveAll(rawTarget);
-  c.log(`Target XPath: ${resolvedTarget}`);
+
+  c.log(`Container XPath: ${resolvedContainer}`);
+  c.log(`Target XPath:    ${resolvedTarget}`);
 
   // Check if target already in DOM
   const isInDOM = (): Promise<boolean> =>
@@ -44,66 +50,52 @@ export async function scrollUntilVisible(ctx: WalnutContext) {
       if (el) el.scrollIntoView({ block: 'center' });
     }, resolvedTarget);
 
-  // Already in DOM — done
+  // Already in DOM — done immediately
   if (await isInDOM()) {
     c.log('Element already in DOM, scrolling into view');
     await scrollIntoView();
     return;
   }
 
-  // Log ALL scrollable containers found so we know exactly what the page has
-  const allContainers: { tag: string; classes: string; scrollHeight: number; clientHeight: number; scrollTop: number }[] =
-    await c.page.evaluate(() => {
-      const results: any[] = [];
-      const all = Array.from(document.querySelectorAll('*'));
-      for (const el of all as HTMLElement[]) {
-        const style = window.getComputedStyle(el);
-        if ((style.overflowY === 'auto' || style.overflowY === 'scroll') && el.scrollHeight > el.clientHeight) {
-          results.push({
-            tag: el.tagName,
-            classes: el.className || '',
-            scrollHeight: el.scrollHeight,
-            clientHeight: el.clientHeight,
-            scrollTop: el.scrollTop,
-          });
-        }
-      }
-      return results;
-    });
+  // Verify container exists
+  const containerExists: boolean = await c.page.evaluate((xp: string) => {
+    try {
+      return !!document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+    } catch (_) { return false; }
+  }, resolvedContainer);
 
-  c.log(`Found ${allContainers.length} scrollable container(s):`);
-  for (const ct of allContainers) {
-    c.log(`  [${ct.tag}] classes="${ct.classes.substring(0, 80)}" scrollHeight=${ct.scrollHeight} clientHeight=${ct.clientHeight} scrollTop=${ct.scrollTop}`);
-  }
+  if (!containerExists) throw new Error(`Container not found in DOM.\nXPath: "${resolvedContainer}"`);
 
-  // Pick the best container — largest clientHeight among scrollable elements (main panel)
-  const best = allContainers.sort((a, b) => b.clientHeight - a.clientHeight)[0];
-  if (!best) throw new Error('No scrollable container found on this page');
+  // Log container scroll state for debugging
+  const containerState = await c.page.evaluate((xp: string) => {
+    const el = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue as HTMLElement;
+    if (!el) return null;
+    const style = window.getComputedStyle(el);
+    return {
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+      scrollTop: el.scrollTop,
+      overflowY: style.overflowY,
+    };
+  }, resolvedContainer);
 
-  c.log(`Using container: [${best.tag}] classes="${best.classes.substring(0, 80)}" scrollHeight=${best.scrollHeight}`);
-
-  // Use the classes of the best container to scroll it
-  const bestClasses = best.classes.trim().split(/\s+/).slice(0, 3).join('.');
+  c.log(`Container state — scrollHeight: ${containerState?.scrollHeight}px, clientHeight: ${containerState?.clientHeight}px, overflowY: ${containerState?.overflowY}`);
 
   let prevScrollTop = -1;
 
   while (true) {
-    const currentScrollTop: number = await c.page.evaluate((classes: string) => {
-      // Find the container by its first 3 classes
-      const selector = classes.split('.').filter(Boolean).map((c: string) => `.${CSS.escape(c)}`).join('');
-      const el = selector ? document.querySelector(selector) as HTMLElement : null;
-      if (el) {
-        const before = el.scrollTop;
-        el.scrollTop += el.clientHeight;
-        el.dispatchEvent(new Event('scroll', { bubbles: true }));
-        return el.scrollTop;
-      }
-      return -1;
-    }, bestClasses);
+    // Scroll the container down by one clientHeight and fire scroll event
+    const currentScrollTop: number = await c.page.evaluate((xp: string) => {
+      const el = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue as HTMLElement;
+      if (!el) return -1;
+      el.scrollTop += el.clientHeight;
+      el.dispatchEvent(new Event('scroll', { bubbles: true }));
+      return el.scrollTop;
+    }, resolvedContainer);
 
-    c.log(`Scrolled container — scrollTop now: ${currentScrollTop}px`);
+    c.log(`Scrolled — scrollTop now: ${currentScrollTop}px`);
 
-    // Wait up to 3s for target to appear (lazy load renders new rows)
+    // Wait up to 3s for target to appear after lazy load renders
     await c.page.waitForFunction(
       (xp: string) => {
         try {
@@ -114,13 +106,14 @@ export async function scrollUntilVisible(ctx: WalnutContext) {
       { timeout: 3000 }
     ).catch(() => {});
 
+    // Check if target appeared
     if (await isInDOM()) {
       c.log('Element found! Scrolling into view');
       await scrollIntoView();
       return;
     }
 
-    // scrollTop unchanged = we hit the bottom
+    // scrollTop did not change — we hit the bottom of the container
     if (currentScrollTop === prevScrollTop || currentScrollTop === -1) {
       throw new Error(`Reached the bottom of the container but element was not found.\nXPath: "${resolvedTarget}"`);
     }
