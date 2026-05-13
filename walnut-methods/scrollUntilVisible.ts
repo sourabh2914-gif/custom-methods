@@ -2,7 +2,7 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Scroll Until Element Visible
- * description: Scroll inside container ${containerXpath} until the linked object is present
+ * description: Scroll page up to ${maxScrolls} times until element is visible
  * actionType: custom_scroll_until_visible
  * context: web
  * needsLocator: true
@@ -12,123 +12,137 @@ export async function scrollUntilVisible(ctx: WalnutContext) {
   if (ctx.platform !== 'web') return;
   const c = ctx as any;
 
-  // args[0] = XPath/CSS of the scrollable container
-  const rawContainer: string = c.args[0];
-  if (!rawContainer) throw new Error('No container XPath provided — pass the scrollable container XPath as the first argument');
-
-  // Resolve {{variable}} and $[runtimeVar] in container locator
+  // ── Resolve all variable syntaxes in a string ─────────────────────────────
+  // Handles every placeholder format Walnut supports:
+  //   {{name}}  — mustache variables
+  //   ${name}   — test data / local params
+  //   $(name)   — global variables
+  //   $[name]   — runtime variables set by previous steps
   const resolveAll = (text: string): string => {
-    const withPlaceholders = c.replacePlaceholders(text);
-    return withPlaceholders.replace(/\$\[([^\]]+)\]/g, (_: string, name: string) => {
-      const val = c.getVariable(name);
-      return (val !== undefined && val !== null) ? String(val) : '';
+    let result: string = c.replacePlaceholders(text);
+
+    // ${param} — test data values
+    result = result.replace(/\$\{([^}]+)\}/g, (_: string, name: string) => {
+      const trimmed = name.trim();
+      const testData: Record<string, any> = c.testDataValues ?? {};
+      const val = testData[trimmed] ?? testData[trimmed.toLowerCase()];
+      return (val !== undefined && val !== null) ? String(val) : _;
     });
+
+    // $(global) — global variables
+    result = result.replace(/\$\(([^)]+)\)/g, (_: string, name: string) => {
+      const trimmed = name.trim();
+      const globals: Record<string, any> = c.globalVarContext ?? {};
+      const val = globals[trimmed] ?? globals[trimmed.toLowerCase()];
+      return (val !== undefined && val !== null) ? String(val) : _;
+    });
+
+    // $[runtime] — runtime variables stored by previous steps
+    result = result.replace(/\$\[([^\]]+)\]/g, (_: string, name: string) => {
+      const val = c.getVariable(name.trim());
+      return (val !== undefined && val !== null) ? String(val) : _;
+    });
+
+    return result;
   };
 
-  const resolvedContainer: string = resolveAll(rawContainer);
+  // ── Read maxScrolls from step arg ─────────────────────────────────────────
+  const maxScrolls: number = c.args[0] ? parseInt(resolveAll(c.args[0]), 10) : 50;
 
-  // Get the linked object locator — works with ANY locator type (XPath, CSS, text, etc.)
-  const locator = c.locator;
-  if (!locator) throw new Error('No object linked to this step — attach the target object in the test case editor');
+  // ── Read and resolve the locator from the attached object ─────────────────
+  // ctx.locator contains the raw selector string attached to the step.
+  // It can be XPath, CSS, or a Playwright selector — resolved through all
+  // variable syntaxes so it can embed runtime values like $[surveyName].
+  const rawLocator: string = c.locator;
+  if (!rawLocator) throw new Error('[scroll_until_visible] No locator attached to this step');
 
-  c.log(`Container: ${resolvedContainer}`);
-  c.log(`Target locator type: ${typeof locator === 'string' ? 'string' : 'Playwright Locator'}`);
+  const resolvedLocator: string = resolveAll(rawLocator);
 
-  // Check if target is already present using the locator directly
+  c.log(`[scroll_until_visible] maxScrolls=${maxScrolls}`);
+  c.log(`[scroll_until_visible] locator=${resolvedLocator}`);
+
+  const page = c.page;
+
+  // ── Build Playwright locator — supports XPath, CSS, and Playwright selectors
+  // XPath   : starts with //  or  /   or  (//
+  // Playwright selector: contains >> or role= or text= etc.
+  // CSS     : everything else
+  const buildLocator = (selector: string) => {
+    const trimmed = selector.trim();
+    const isXPath = trimmed.startsWith('//') ||
+                    trimmed.startsWith('/') ||
+                    trimmed.startsWith('(//');
+    const isPlaywright = /^(text=|role=|label=|placeholder=|alt=|title=|testid=|data-testid=|nth=|\.\.)/.test(trimmed) ||
+                         trimmed.includes(' >> ');
+
+    if (isXPath)        return page.locator(`xpath=${trimmed}`);
+    if (isPlaywright)   return page.locator(trimmed);
+    return               page.locator(trimmed); // CSS
+  };
+
+  const targetLocator = buildLocator(resolvedLocator);
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
   const isPresent = async (): Promise<boolean> => {
-    try {
-      const count = typeof locator === 'string'
-        ? await c.count(locator)
-        : await locator.count();
-      return count > 0;
-    } catch (_) { return false; }
+    try { return (await targetLocator.count()) > 0; } catch { return false; }
   };
 
-  // Scroll target into view using the locator directly
   const scrollIntoView = async (): Promise<void> => {
-    try {
-      if (typeof locator === 'string') {
-        await c.page.evaluate((sel: string) => {
-          const el = document.evaluate(sel, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue as HTMLElement
-            || document.querySelector(sel) as HTMLElement;
-          if (el) el.scrollIntoView({ block: 'center' });
-        }, locator);
-      } else {
-        await locator.first().scrollIntoViewIfNeeded();
-      }
-    } catch (_) {}
+    try { await targetLocator.first().scrollIntoViewIfNeeded(); } catch { /* ignore */ }
   };
 
-  // Already present — done immediately
+  // ── Short-circuit if already in DOM ───────────────────────────────────────
   if (await isPresent()) {
-    c.log('Element already present, scrolling into view');
+    c.log(`[scroll_until_visible] Element already present — scrolling into view`);
     await scrollIntoView();
     return;
   }
 
-  // Verify container exists
-  const containerExists: boolean = await c.page.evaluate((xp: string) => {
-    try {
-      return !!(
-        document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue ||
-        document.querySelector(xp)
-      );
-    } catch (_) {
-      return !!document.querySelector(xp);
+  let prevRowCount = -1;
+  let prevWindowY  = -1;
+
+  for (let i = 0; i < maxScrolls; i++) {
+
+    // 1. Scroll last <tr> into view — triggers table infinite-scroll
+    const lastRow = page.locator('tbody tr').last();
+    if (await lastRow.count() > 0) {
+      await lastRow.scrollIntoViewIfNeeded();
     }
-  }, resolvedContainer);
 
-  if (!containerExists) throw new Error(`Container not found in DOM.\nLocator: "${resolvedContainer}"`);
+    // 2. Push window down — triggers window-level infinite-scroll
+    const windowY: number = await page.evaluate(() => {
+      window.scrollBy({ top: window.innerHeight, behavior: 'instant' });
+      window.dispatchEvent(new Event('scroll', { bubbles: true }));
+      return window.scrollY;
+    });
 
-  // Log container scroll info
-  const containerState = await c.page.evaluate((xp: string) => {
-    const el = (
-      document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue ||
-      document.querySelector(xp)
-    ) as HTMLElement;
-    if (!el) return null;
-    return {
-      scrollHeight: el.scrollHeight,
-      clientHeight: el.clientHeight,
-      scrollTop: el.scrollTop,
-      overflowY: window.getComputedStyle(el).overflowY,
-    };
-  }, resolvedContainer);
+    // Wait for React / virtual list to render new items
+    await page.waitForTimeout(500);
 
-  c.log(`Container — scrollHeight: ${containerState?.scrollHeight}px, clientHeight: ${containerState?.clientHeight}px, overflowY: ${containerState?.overflowY}`);
+    const rowCount = await page.locator('tbody tr').count();
+    c.log(`[scroll_until_visible] iteration=${i + 1} rows=${rowCount} windowY=${windowY}px`);
 
-  let prevScrollTop = -1;
-
-  while (true) {
-    // Scroll container down by one clientHeight and fire scroll event for lazy load
-    const currentScrollTop: number = await c.page.evaluate((xp: string) => {
-      const el = (
-        document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue ||
-        document.querySelector(xp)
-      ) as HTMLElement;
-      if (!el) return -1;
-      el.scrollTop += el.clientHeight;
-      el.dispatchEvent(new Event('scroll', { bubbles: true }));
-      return el.scrollTop;
-    }, resolvedContainer);
-
-    c.log(`Scrolled — scrollTop now: ${currentScrollTop}px`);
-
-    // Wait up to 3s for lazy load to render new rows then check presence
-    await c.page.waitForFunction(() => true, { timeout: 3000 }).catch(() => {});
-
-    // Check using the actual locator — works for any selector type
+    // Check for target
     if (await isPresent()) {
-      c.log('Element found! Scrolling into view');
+      c.log(`[scroll_until_visible] Element found — scrolling into view`);
       await scrollIntoView();
       return;
     }
 
-    // scrollTop unchanged — hit the bottom of the container
-    if (currentScrollTop === prevScrollTop || currentScrollTop === -1) {
-      throw new Error(`Reached the bottom of the container but the linked element was not found.`);
+    // Bottom detection: neither rows increased nor window moved
+    if (rowCount === prevRowCount && windowY === prevWindowY) {
+      throw new Error(
+        `[scroll_until_visible] Reached bottom after ${i + 1} scroll(s) — element not found.\n` +
+        `Locator: "${resolvedLocator}"`,
+      );
     }
 
-    prevScrollTop = currentScrollTop;
+    prevRowCount = rowCount;
+    prevWindowY  = windowY;
   }
+
+  throw new Error(
+    `[scroll_until_visible] Exceeded max scroll limit (${maxScrolls}) — element not found.\n` +
+    `Locator: "${resolvedLocator}"`,
+  );
 }
