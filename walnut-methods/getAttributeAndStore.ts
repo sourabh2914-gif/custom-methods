@@ -19,23 +19,15 @@ export async function getAttributeAndStore(ctx: WalnutContext) {
   if (!attribute) throw new Error('No attribute name provided — pass the attribute name as the first argument, e.g. "data-id"');
   if (!outputVar)  throw new Error('No output variable provided — add $[variableName] to the step description');
 
-  const c = ctx as any;
-  const locator = c.locator;
+  const locator = (ctx as any).locator;
   if (!locator) throw new Error('No object linked to this step — attach an object in the test case editor');
 
-  let value: string | null = null;
-
-  if (typeof locator === 'string') {
-    // XPath / CSS string — pass directly to the SDK helper
-    value = await ctx.getAttribute(locator, attribute);
-  } else {
-    // Playwright Locator object — call getAttribute directly on the element
-    // Do NOT pass the locator object to ctx.getAttribute (it only accepts strings)
-    value = await locator.first().evaluate(
-      (el: Element, attr: string) => el.getAttribute(attr),
-      attribute
-    );
-  }
+  // locator is always a Playwright Locator object when needsLocator: true
+  // Call evaluate() to retrieve the attribute via the DOM directly
+  const value: string | null = await locator.evaluate(
+    (el: Element, attr: string) => el.getAttribute(attr),
+    attribute
+  );
 
   if (value === null || value === undefined) {
     throw new Error(`Attribute "${attribute}" was not found on the linked element`);
