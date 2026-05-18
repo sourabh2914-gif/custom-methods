@@ -26,11 +26,15 @@ export async function getAttributeAndStore(ctx: WalnutContext) {
   let value: string | null = null;
 
   if (typeof locator === 'string') {
-    // XPath / CSS string coming from the linked object
+    // XPath / CSS string — pass directly to the SDK helper
     value = await ctx.getAttribute(locator, attribute);
   } else {
-    // Playwright Locator instance
-    value = await locator.first().getAttribute(attribute);
+    // Playwright Locator object — call getAttribute directly on the element
+    // Do NOT pass the locator object to ctx.getAttribute (it only accepts strings)
+    value = await locator.first().evaluate(
+      (el: Element, attr: string) => el.getAttribute(attr),
+      attribute
+    );
   }
 
   if (value === null || value === undefined) {
