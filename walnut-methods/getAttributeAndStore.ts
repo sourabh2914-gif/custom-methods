@@ -9,33 +9,21 @@ import type { WalnutContext } from './walnut';
  * category: Query
  */
 export async function getAttributeAndStore(ctx: WalnutContext) {
-  if (ctx.platform !== 'web') return;
-  const c = ctx as any;
-
-  const locator = c.locator;
-  if (!locator) throw new Error('No object linked to this step — attach an object in the test case editor');
-
-  // args[0] = attribute name (from ${attribute})
-  // args[1] = runtime variable name (from $[result])
-  const attribute: string = c.args[0];
-  const outputVar: string = c.args[1];
+  // ctx.args[0] = value of ${attribute} — the HTML attribute name to retrieve (e.g. "href", "class", "data-id")
+  // ctx.args[1] = "result" (from $[result]) — runtime variable name to store into
+  const attribute = ctx.args[0];
+  const outputVar = ctx.args[1];
 
   if (!attribute) throw new Error('No attribute name provided — pass the attribute name as the first argument');
   if (!outputVar) throw new Error('No output variable provided — add $[variableName] to the step description');
 
-  let value: string | null = null;
-
-  if (typeof locator === 'string') {
-    value = await c.getAttribute(locator, attribute);
-  } else {
-    value = await locator.first().getAttribute(attribute);
-  }
+  const value = await ctx.getAttribute(ctx.locator, attribute);
 
   if (value === null || value === undefined) {
     throw new Error(`Attribute "${attribute}" not found on the linked element`);
   }
 
-  c.log(`Got attribute "${attribute}": "${value}"`);
-  c.setVariable(outputVar, value);
-  c.log(`Stored in $[${outputVar}]: "${value}"`);
+  ctx.log(`Got attribute "${attribute}": "${value}"`);
+  ctx.setVariable(outputVar, value);
+  ctx.log(`Stored in $[${outputVar}]: "${value}"`);
 }
