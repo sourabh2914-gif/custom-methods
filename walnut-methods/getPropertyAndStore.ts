@@ -13,9 +13,17 @@ export async function getPropertyAndStore(ctx: WalnutContext) {
   // ctx.args[1] = "result" (from $[result]) — runtime variable name to store into
   const property = ctx.args[0];
   const outputVar = ctx.args[1];
+  const locator = (ctx as any).locator;
 
-  const value = await ctx.getAttribute(ctx.locator, property);
+  let value: string | null = null;
+  if (typeof locator === 'string') {
+    // locator is a string XPath/CSS selector — use built-in ctx.getAttribute
+    value = await ctx.getAttribute(locator, property);
+  } else {
+    // locator is a Playwright Locator object — call getAttribute directly on it
+    value = await locator.getAttribute(property);
+  }
+
   ctx.log(`Got property "${property}": "${value}"`);
-
-  ctx.setVariable(outputVar, value);
+  ctx.setVariable(outputVar, value ?? '');
 }
