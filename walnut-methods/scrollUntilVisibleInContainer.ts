@@ -2,158 +2,145 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Scroll Until Visible In Container
- * description: Scroll container until the object is found, with max ${maxScrolls} scroll attempts
+ * description: Scroll container until the $[survey_name] is found, with max ${maxScrolls} scroll attempts
  * actionType: custom_scroll_until_visible_in_container
  * context: web
- * needsLocator: true
+ * needsLocator: false
  * category: Navigation
  */
 export async function scrollUntilVisibleInContainer(ctx: WalnutContext) {
   if (ctx.platform !== 'web') return;
 
-  const locator = (ctx as any).locator;
-  if (!locator) throw new Error('No object linked to this step — attach an object in the test case editor');
+  // args[0] = "survey_name"  (the variable name, from $[survey_name])
+  // args[1] = "50"           (maxScrolls value, from ${maxScrolls})
+  const surveyNameVarName = ctx.args[0];                          // "survey_name"
+  const maxScrolls        = parseInt(ctx.args[1], 10) || 50;
 
-  const maxScrolls = parseInt(ctx.args[0], 10) || 50;
   const page = ctx.page;
 
-  // Retrieve the XPath/selector string from the locator so we can re-query fresh each time
-  // This avoids "Element is not attached to the DOM" on stale references after re-renders
-  const selectorStr: string | undefined =
-    (locator as any)._selector ??
-    (locator as any)._locator?._selector ??
-    (locator as any)._impl?._selector;
-
-  const isFreshPresent = async (): Promise<boolean> => {
-    try {
-      if (selectorStr) {
-        return (await page.locator(selectorStr).count()) > 0;
-      }
-      return (await locator.count()) > 0;
-    } catch {
-      return false;
-    }
-  };
-
-  const scrollFreshIntoView = async (): Promise<void> => {
-    try {
-      if (selectorStr) {
-        await page.locator(selectorStr).first().scrollIntoViewIfNeeded();
-      } else {
-        await locator.first().scrollIntoViewIfNeeded();
-      }
-    } catch {
-      /* ignore — best-effort scroll */
-    }
-  };
-
-  // Short-circuit: element already present
-  if (await isFreshPresent()) {
-    await scrollFreshIntoView();
-    ctx.log('[ScrollUntilVisibleInContainer] Element already present — scrolled into view');
-    return;
+  // Resolve the runtime variable value — e.g. "P_Survey Name_Validation"
+  const surveyNameValue = ctx.getVariable(surveyNameVarName);
+  if (!surveyNameValue) {
+    throw new Error(
+      `[ScrollUntilVisibleInContainer] Runtime variable "$[${surveyNameVarName}]" is not set. ` +
+      `Make sure a previous step stores the survey name into this variable.`
+    );
   }
 
-  // Find the scrollable overflow container that wraps the table
-  // Matches the div.custom-scrollbar.w-full.overflow-auto pattern visible in DevTools
-  const containerSelector = 'div.overflow-auto, div[class*="overflow-auto"], div[class*="custom-scrollbar"]';
+  ctx.log(`[ScrollUntilVisibleInContainer] Looking for survey: "${surveyNameValue}"`);
+
+  // Build the resolved XPath — same pattern as your object XPath but with real value
+  const resolvedXPath = `(//span[contains(normalize-space(), '${surveyNameValue}')])[1]`;
+
+  // Fresh DOM check using the fully resolved XPath each call — never stale
+  const isPresent = async (): Promise<boolean> => {
+    try { return (await page.locator(`xpath=${resolvedXPath}`).count()) > 0; } catch { return false; }
+  };
+
+  // Short-circuit: already in DOM before any scrolling
+  if (await isPresent()) {
+    ctx.log('[ScrollUntilVisibleInContainer] Element already in DOM — done');
+    return;
+  }
 
   let prevScrollTop = -1;
   let prevRowCount  = -1;
 
   for (let i = 0; i < maxScrolls; i++) {
 
-    // Scroll the overflow container by one viewport-height worth of pixels
-    const scrollResult: { scrollTop: number; scrollHeight: number; clientHeight: number } =
-      await page.evaluate((sel: string) => {
-        const container = document.querySelector(sel) as HTMLElement | null;
-        if (container) {
+    // Scroll the overflow-auto container via evaluate — zero DOM references held
+    const scrollInfo: { scrollTop: number; scrollHeight: number; containerFound: boolean } =
+      await page.evaluate(() => {
+        // Pick the overflow-auto container with the most scrollable content (the table wrapper)
+        const candidates = Array.from(
+          document.querySelectorAll('div[class*="overflow-auto"], div[class*="custom-scrollbar"]')
+        ) as HTMLElement[];
+
+        candidates.sort((a, b) => b.scrollHeight - a.scrollHeight);
+        const container = candidates[0] ?? null;
+
+        if (container && container.scrollHeight > container.clientHeight) {
           container.scrollBy({ top: container.clientHeight, behavior: 'instant' });
           container.dispatchEvent(new Event('scroll', { bubbles: true }));
           return {
-            scrollTop:    container.scrollTop,
-            scrollHeight: container.scrollHeight,
-            clientHeight: container.clientHeight,
+            scrollTop:      container.scrollTop,
+            scrollHeight:   container.scrollHeight,
+            containerFound: true,
           };
         }
-        // Fallback: scroll window
+
+        // Fallback: window scroll
         window.scrollBy({ top: window.innerHeight, behavior: 'instant' });
         window.dispatchEvent(new Event('scroll', { bubbles: true }));
-        return { scrollTop: window.scrollY, scrollHeight: document.body.scrollHeight, clientHeight: window.innerHeight };
-      }, containerSelector);
+        return {
+          scrollTop:      window.scrollY,
+          scrollHeight:   document.body.scrollHeight,
+          containerFound: false,
+        };
+      });
 
-    // Also scroll the last visible row into view to trigger table's own virtual/infinite scroll
-    const lastRow = page.locator('tbody tr').last();
-    if ((await lastRow.count()) > 0) {
-      try { await lastRow.scrollIntoViewIfNeeded(); } catch { /* ignore stale */ }
-    }
-
+    // Wait for lazy-loaded rows to render after scroll
     await ctx.wait(600);
 
     const rowCount: number = await page.locator('tbody tr').count();
-    const scrollTop = scrollResult.scrollTop;
+    const scrollTop = scrollInfo.scrollTop;
 
     ctx.log(
       `[ScrollUntilVisibleInContainer] iteration=${i + 1} rows=${rowCount} ` +
-      `scrollTop=${scrollTop}px scrollHeight=${scrollResult.scrollHeight}px`
+      `scrollTop=${scrollTop}px scrollHeight=${scrollInfo.scrollHeight}px containerFound=${scrollInfo.containerFound}`
     );
 
-    // Check for target after scroll
-    if (await isFreshPresent()) {
-      ctx.log('[ScrollUntilVisibleInContainer] Element found — scrolling into view');
-      await scrollFreshIntoView();
+    // Check for target after scroll + render
+    if (await isPresent()) {
+      ctx.log(`[ScrollUntilVisibleInContainer] Element "${surveyNameValue}" found — stopping scroll`);
       return;
     }
 
-    // Stagnation check — neither container moved nor new rows loaded
+    // Stagnation: container didn't move AND no new rows loaded
     if (scrollTop === prevScrollTop && rowCount === prevRowCount) {
       ctx.log(`[ScrollUntilVisibleInContainer] Stagnation at iteration=${i + 1} — waiting 3s for lazy load...`);
       await ctx.wait(3000);
 
       // Retry scroll after grace period
-      const retryResult: { scrollTop: number; scrollHeight: number; clientHeight: number } =
-        await page.evaluate((sel: string) => {
-          const container = document.querySelector(sel) as HTMLElement | null;
-          if (container) {
+      const retryInfo: { scrollTop: number; scrollHeight: number; containerFound: boolean } =
+        await page.evaluate(() => {
+          const candidates = Array.from(
+            document.querySelectorAll('div[class*="overflow-auto"], div[class*="custom-scrollbar"]')
+          ) as HTMLElement[];
+          candidates.sort((a, b) => b.scrollHeight - a.scrollHeight);
+          const container = candidates[0] ?? null;
+
+          if (container && container.scrollHeight > container.clientHeight) {
             container.scrollBy({ top: container.clientHeight, behavior: 'instant' });
             container.dispatchEvent(new Event('scroll', { bubbles: true }));
-            return {
-              scrollTop:    container.scrollTop,
-              scrollHeight: container.scrollHeight,
-              clientHeight: container.clientHeight,
-            };
+            return { scrollTop: container.scrollTop, scrollHeight: container.scrollHeight, containerFound: true };
           }
           window.scrollBy({ top: window.innerHeight, behavior: 'instant' });
           window.dispatchEvent(new Event('scroll', { bubbles: true }));
-          return { scrollTop: window.scrollY, scrollHeight: document.body.scrollHeight, clientHeight: window.innerHeight };
-        }, containerSelector);
-
-      const lastRowRetry = page.locator('tbody tr').last();
-      if ((await lastRowRetry.count()) > 0) {
-        try { await lastRowRetry.scrollIntoViewIfNeeded(); } catch { /* ignore stale */ }
-      }
+          return { scrollTop: window.scrollY, scrollHeight: document.body.scrollHeight, containerFound: false };
+        });
 
       await ctx.wait(600);
 
       const rowCountRetry: number = await page.locator('tbody tr').count();
       ctx.log(
-        `[ScrollUntilVisibleInContainer] Post-grace: rows=${rowCountRetry} scrollTop=${retryResult.scrollTop}px`
+        `[ScrollUntilVisibleInContainer] Post-grace: rows=${rowCountRetry} scrollTop=${retryInfo.scrollTop}px`
       );
 
-      if (await isFreshPresent()) {
-        ctx.log('[ScrollUntilVisibleInContainer] Element found after grace period — scrolling into view');
-        await scrollFreshIntoView();
+      if (await isPresent()) {
+        ctx.log(`[ScrollUntilVisibleInContainer] Element "${surveyNameValue}" found after grace period — stopping scroll`);
         return;
       }
 
-      // Still completely stagnant → truly at bottom
-      if (rowCountRetry === rowCount && retryResult.scrollTop === scrollTop) {
+      // Truly at bottom — no movement at all after retry
+      if (rowCountRetry === rowCount && retryInfo.scrollTop === scrollTop) {
         throw new Error(
-          `[ScrollUntilVisibleInContainer] Reached bottom after ${i + 1} scroll(s) — element not found.`
+          `[ScrollUntilVisibleInContainer] Reached bottom after ${i + 1} scroll(s) — ` +
+          `element "${surveyNameValue}" not found.`
         );
       }
 
-      prevScrollTop = retryResult.scrollTop;
+      prevScrollTop = retryInfo.scrollTop;
       prevRowCount  = rowCountRetry;
       continue;
     }
@@ -163,6 +150,7 @@ export async function scrollUntilVisibleInContainer(ctx: WalnutContext) {
   }
 
   throw new Error(
-    `[ScrollUntilVisibleInContainer] Exceeded max scroll limit (${maxScrolls}) — element not found.`
+    `[ScrollUntilVisibleInContainer] Exceeded max scroll limit (${maxScrolls}) — ` +
+    `element "${surveyNameValue}" not found.`
   );
 }
