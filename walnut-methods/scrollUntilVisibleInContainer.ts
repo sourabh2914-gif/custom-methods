@@ -2,7 +2,7 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Scroll Until Visible In Container
- * description: Scroll container until the object is found, with max ${maxScrolls} scroll attempts
+ * description: Scroll container until the object is found
  * actionType: custom_scroll_until_visible_in_container
  * context: web
  * needsLocator: true
@@ -13,9 +13,6 @@ export async function scrollUntilVisibleInContainer(ctx: WalnutContext) {
 
   const locator = (ctx as any).locator;
   if (!locator) throw new Error('No object linked to this step — attach an object in the test case editor');
-
-  // args[0] = value of ${maxScrolls} — defaults to 50 if not passed or not a number
-  const maxScrolls = parseInt(ctx.args[0], 10) || 50;
 
   const page = ctx.page;
 
@@ -34,8 +31,10 @@ export async function scrollUntilVisibleInContainer(ctx: WalnutContext) {
 
   let prevScrollTop = -1;
   let prevRowCount  = -1;
+  let iteration     = 0;
 
-  for (let i = 0; i < maxScrolls; i++) {
+  while (true) {
+    iteration++;
 
     // Scroll the overflow-auto container entirely via page.evaluate — no Playwright
     // DOM handles are held, so re-renders never cause stale reference errors.
@@ -77,7 +76,7 @@ export async function scrollUntilVisibleInContainer(ctx: WalnutContext) {
     const scrollTop = scrollInfo.scrollTop;
 
     ctx.log(
-      `[ScrollUntilVisibleInContainer] iteration=${i + 1} rows=${rowCount} ` +
+      `[ScrollUntilVisibleInContainer] iteration=${iteration} rows=${rowCount} ` +
       `scrollTop=${scrollTop}px scrollHeight=${scrollInfo.scrollHeight}px containerFound=${scrollInfo.containerFound}`
     );
 
@@ -89,7 +88,7 @@ export async function scrollUntilVisibleInContainer(ctx: WalnutContext) {
 
     // Stagnation: container position unchanged AND no new rows loaded
     if (scrollTop === prevScrollTop && rowCount === prevRowCount) {
-      ctx.log(`[ScrollUntilVisibleInContainer] Stagnation at iteration=${i + 1} — waiting 3s for lazy load...`);
+      ctx.log(`[ScrollUntilVisibleInContainer] Stagnation at iteration=${iteration} — waiting 3s for lazy load...`);
       await ctx.wait(3000);
 
       // One more scroll attempt after the grace period
@@ -126,7 +125,7 @@ export async function scrollUntilVisibleInContainer(ctx: WalnutContext) {
       // Truly at bottom — nothing moved even after grace period
       if (rowCountRetry === rowCount && retryInfo.scrollTop === scrollTop) {
         throw new Error(
-          `[ScrollUntilVisibleInContainer] Reached bottom after ${i + 1} scroll(s) — element not found.`
+          `[ScrollUntilVisibleInContainer] Reached bottom after ${iteration} scroll(s) — element not found.`
         );
       }
 
@@ -138,8 +137,4 @@ export async function scrollUntilVisibleInContainer(ctx: WalnutContext) {
     prevScrollTop = scrollTop;
     prevRowCount  = rowCount;
   }
-
-  throw new Error(
-    `[ScrollUntilVisibleInContainer] Exceeded max scroll limit (${maxScrolls}) — element not found.`
-  );
 }
