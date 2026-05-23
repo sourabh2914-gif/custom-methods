@@ -2,7 +2,7 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Concatenate and Store
- * description: Concatenates the data of the specified parameters and stores in runtime parameter $[result] - n number of parameters can be added parameter n-1 - The last parameter would be the runtime parameter to store the final value
+ * description: Concatenate ${param1} and ${param2} and store in $[result]
  * actionType: custom_concatenate_and_store
  * context: shared
  * needsLocator: false
@@ -10,11 +10,23 @@ import type { WalnutContext } from './walnut';
  */
 export async function concatenateAndStore(ctx: WalnutContext) {
   // ctx.args layout:
-  //   args[0] .. args[n-2] — values to concatenate (resolved from ${paramN} or $[varN])
+  //   args[0] .. args[n-2] — values to concatenate.
+  //                          Each arg can be:
+  //                            - a runtime variable name  → resolved via ctx.getVariable()
+  //                            - a literal string value   → used as-is (including spaces/separators)
   //   args[n-1]            — output variable name (from $[result])
   //
-  // Each arg is checked: if it looks like a runtime variable name (i.e. getVariable returns
-  // a non-undefined value), the stored value is used; otherwise the raw arg string is used.
+  // Example description:
+  //   "Concatenate ${firstName} and ${lastName} and store in $[fullName]"
+  //   → args = ["John", "Doe", "fullName"]  → stores "JohnDoe"
+  //
+  //   "Concatenate ${firstName} and ${separator} and ${lastName} and store in $[fullName]"
+  //   where separator = " "
+  //   → args = ["John", " ", "Doe", "fullName"]  → stores "John Doe"
+  //
+  //   "Concatenate $[firstName] and $[lastName] and store in $[fullName]"
+  //   → args = ["firstName", "lastName", "fullName"]
+  //   → reads ctx.getVariable("firstName") and ctx.getVariable("lastName") → stores combined value
 
   const allArgs: string[] = (ctx as any).args ?? [];
 
@@ -25,20 +37,22 @@ export async function concatenateAndStore(ctx: WalnutContext) {
   }
 
   const outputVar = allArgs[allArgs.length - 1];          // last arg = $[result]
-  const valueArgs = allArgs.slice(0, allArgs.length - 1); // all but last
+  const valueArgs = allArgs.slice(0, allArgs.length - 1); // all preceding args = values
 
   const resolvedParts: string[] = valueArgs.map((arg, i) => {
-    // Try to read as a runtime variable first; fall back to the raw string value
+    // First, try to resolve as a runtime variable
     const fromVar = ctx.getVariable(arg);
     if (fromVar !== undefined && fromVar !== null) {
-      ctx.log(`arg[${i}] "${arg}" resolved from runtime variable → "${fromVar}"`);
+      ctx.log(`arg[${i}] "${arg}" → resolved from runtime variable: "${fromVar}"`);
       return String(fromVar);
     }
-    ctx.log(`arg[${i}] used as literal value → "${arg}"`);
+    // Otherwise use the raw value as-is (handles literals, spaces, separators, etc.)
+    ctx.log(`arg[${i}] "${arg}" → used as literal value`);
     return String(arg);
   });
 
+  // Join all parts directly — spaces/separators are already part of the resolved values
   const concatenated = resolvedParts.join('');
-  ctx.log(`Concatenated result: "${concatenated}"`);
+  ctx.log(`Final concatenated value: "${concatenated}"`);
   ctx.setVariable(outputVar, concatenated);
 }
