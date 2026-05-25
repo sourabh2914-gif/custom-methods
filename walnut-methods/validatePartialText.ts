@@ -2,20 +2,21 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Validate Partial Text
- * description: Validate element contains partial text ${text}
+ * description: Validate element ${xpath} contains partial text ${text}
  * actionType: custom_validate_partial_text
  * context: web
- * needsLocator: true
+ * needsLocator: false
  * category: Verification
  */
 export async function validatePartialText(ctx: WalnutContext) {
   const c = ctx as any;
-  // ctx.args[0] = value of ${text} — the partial text to look for inside the element
-  const expectedText: string | undefined = c.args?.[0];
-  const locator = c.locator;
+  // ctx.args[0] = value of ${xpath} — XPath selector passed as runtime parameter
+  // ctx.args[1] = value of ${text} — the partial text to look for inside the element
+  const xpath: string | undefined = c.args?.[0];
+  const expectedText: string | undefined = c.args?.[1];
 
-  if (!locator) {
-    throw new Error('No object linked to this step — attach an object in the test case editor');
+  if (!xpath) {
+    throw new Error('XPath argument is missing — pass the element XPath as the first parameter');
   }
 
   if (expectedText == null || expectedText === '') {
@@ -25,29 +26,15 @@ export async function validatePartialText(ctx: WalnutContext) {
   const normalize = (s: string) => s.replace(/\s+/g, ' ').trim().toLowerCase();
 
   async function resolveText(): Promise<string> {
-    if (typeof locator === 'string') {
-      const candidates = [
-        () => c.getText(locator),
-        () => c.getInputValue(locator),
-      ];
-      for (const fn of candidates) {
-        try {
-          const val = await fn();
-          if (val) return normalize(val);
-        } catch (_) {}
-      }
-    } else {
-      const candidates = [
-        () => locator.innerText(),
-        () => locator.textContent(),
-        () => locator.inputValue(),
-      ];
-      for (const fn of candidates) {
-        try {
-          const val = await fn();
-          if (val) return normalize(val);
-        } catch (_) {}
-      }
+    const candidates = [
+      () => c.getText(xpath),
+      () => c.getInputValue(xpath),
+    ];
+    for (const fn of candidates) {
+      try {
+        const val = await fn();
+        if (val) return normalize(val);
+      } catch (_) {}
     }
     return '';
   }
@@ -55,6 +42,7 @@ export async function validatePartialText(ctx: WalnutContext) {
   const actualText = await resolveText();
   const normalizedExpected = normalize(expectedText);
 
+  c.log(`XPath: "${xpath}"`);
   c.log(`Element text: "${actualText}"`);
   c.log(`Checking for partial text: "${normalizedExpected}"`);
 
