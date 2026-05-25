@@ -12,12 +12,15 @@ export async function validatePartialText(ctx: WalnutContext) {
   const c = ctx as any;
   // ctx.args[0] = value of ${xpath} — XPath selector passed as runtime parameter
   // ctx.args[1] = value of ${text} — the partial text to look for inside the element
-  const xpath: string | undefined = c.args?.[0];
+  const rawXpath: string | undefined = c.args?.[0];
   const expectedText: string | undefined = c.args?.[1];
 
-  if (!xpath) {
+  if (!rawXpath) {
     throw new Error('XPath argument is missing — pass the element XPath as the first parameter');
   }
+
+  // Resolve any {{variable}} or $[variable] placeholders inside the XPath
+  const xpath: string = c.replacePlaceholders(rawXpath);
 
   if (expectedText == null || expectedText === '') {
     throw new Error('Expected text argument is missing or empty');
@@ -42,7 +45,8 @@ export async function validatePartialText(ctx: WalnutContext) {
   const actualText = await resolveText();
   const normalizedExpected = normalize(expectedText);
 
-  c.log(`XPath: "${xpath}"`);
+  c.log(`XPath (raw): "${rawXpath}"`);
+  c.log(`XPath (resolved): "${xpath}"`);
   c.log(`Element text: "${actualText}"`);
   c.log(`Checking for partial text: "${normalizedExpected}"`);
 
