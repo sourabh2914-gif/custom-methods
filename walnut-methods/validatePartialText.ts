@@ -11,34 +11,56 @@ import type { WalnutContext } from './walnut';
 export async function validatePartialText(ctx: WalnutContext) {
   const c = ctx as any;
   // ctx.args[0] = value of ${text} — the partial text to look for inside the element
-  const expectedText = c.args[0];
+  const expectedText: string | undefined = c.args?.[0];
   const locator = c.locator;
 
-  if (!locator) throw new Error('No object linked to this step — attach an object in the test case editor');
-
-  let actualText = '';
-
-  if (typeof locator === 'string') {
-    try { actualText = (await c.getText(locator) ?? '').trim(); } catch (_) {}
-    if (!actualText) {
-      try { actualText = (await c.getInputValue(locator) ?? '').trim(); } catch (_) {}
-    }
-  } else {
-    try { actualText = (await locator.innerText() ?? '').trim(); } catch (_) {}
-    if (!actualText) {
-      try { actualText = (await locator.textContent() ?? '').trim(); } catch (_) {}
-    }
-    if (!actualText) {
-      try { actualText = (await locator.inputValue() ?? '').trim(); } catch (_) {}
-    }
+  if (!locator) {
+    throw new Error('No object linked to this step — attach an object in the test case editor');
   }
+
+  if (expectedText == null || expectedText === '') {
+    throw new Error('Expected text argument is missing or empty');
+  }
+
+  const normalize = (s: string) => s.replace(/\s+/g, ' ').trim().toLowerCase();
+
+  async function resolveText(): Promise<string> {
+    if (typeof locator === 'string') {
+      const candidates = [
+        () => c.getText(locator),
+        () => c.getInputValue(locator),
+      ];
+      for (const fn of candidates) {
+        try {
+          const val = await fn();
+          if (val) return normalize(val);
+        } catch (_) {}
+      }
+    } else {
+      const candidates = [
+        () => locator.innerText(),
+        () => locator.textContent(),
+        () => locator.inputValue(),
+      ];
+      for (const fn of candidates) {
+        try {
+          const val = await fn();
+          if (val) return normalize(val);
+        } catch (_) {}
+      }
+    }
+    return '';
+  }
+
+  const actualText = await resolveText();
+  const normalizedExpected = normalize(expectedText);
 
   c.log(`Element text: "${actualText}"`);
-  c.log(`Checking for partial text: "${expectedText}"`);
+  c.log(`Checking for partial text: "${normalizedExpected}"`);
 
-  if (!actualText.includes(expectedText)) {
-    throw new Error(`Expected element to contain "${expectedText}" but got "${actualText}"`);
+  if (!actualText.includes(normalizedExpected)) {
+    throw new Error(`Expected element to contain "${normalizedExpected}" but got "${actualText}"`);
   }
 
-  c.log(`Validation passed: element contains "${expectedText}"`);
+  c.log(`Validation passed: element contains "${normalizedExpected}"`);
 }
