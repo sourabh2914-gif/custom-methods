@@ -19,8 +19,12 @@ export async function validatePartialText(ctx: WalnutContext) {
     throw new Error('XPath argument is missing — pass the element XPath as the first parameter');
   }
 
-  // Resolve any {{variable}} or $[variable] placeholders inside the XPath
-  const xpath: string = c.replacePlaceholders(rawXpath);
+  // Resolve $[varName] runtime variable placeholders inside the XPath
+  const xpath: string = rawXpath.replace(/\$\[([^\]]+)\]/g, (_match, varName) => {
+    const val = c.getVariable(varName);
+    if (val == null) throw new Error(`Runtime variable "$[${varName}]" is not set — ensure a previous step stores it`);
+    return val;
+  });
 
   if (expectedText == null || expectedText === '') {
     throw new Error('Expected text argument is missing or empty');
