@@ -2,43 +2,61 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Validate Partial Text
- * description: Validate element contains partial text ${text}
+ * description: Validate element ${xpath} contains partial text ${text}
  * actionType: custom_validate_partial_text
  * context: web
- * needsLocator: true
+ * needsLocator: false
  * category: Verification
  */
 export async function validatePartialText(ctx: WalnutContext) {
   const c = ctx as any;
-  // ctx.args[0] = value of ${text} — the partial text to look for inside the element
-  const expectedText = c.args[0];
-  const locator = c.locator;
+  // ctx.args[0] = value of ${xpath} — XPath selector passed as runtime parameter
+  // ctx.args[1] = value of ${text} — the partial text to look for inside the element
+  const rawXpath: string | undefined = c.args?.[0];
+  const expectedText: string | undefined = c.args?.[1];
 
-  if (!locator) throw new Error('No object linked to this step — attach an object in the test case editor');
-
-  let actualText = '';
-
-  if (typeof locator === 'string') {
-    try { actualText = (await c.getText(locator) ?? '').trim(); } catch (_) {}
-    if (!actualText) {
-      try { actualText = (await c.getInputValue(locator) ?? '').trim(); } catch (_) {}
-    }
-  } else {
-    try { actualText = (await locator.innerText() ?? '').trim(); } catch (_) {}
-    if (!actualText) {
-      try { actualText = (await locator.textContent() ?? '').trim(); } catch (_) {}
-    }
-    if (!actualText) {
-      try { actualText = (await locator.inputValue() ?? '').trim(); } catch (_) {}
-    }
+  if (!rawXpath) {
+    throw new Error('XPath argument is missing — pass the element XPath as the first parameter');
   }
 
+  // Resolve $[varName] runtime variable placeholders inside the XPath
+  const xpath: string = rawXpath.replace(/\$\[([^\]]+)\]/g, (_match, varName) => {
+    const val = c.getVariable(varName);
+    if (val == null) throw new Error(`Runtime variable "$[${varName}]" is not set — ensure a previous step stores it`);
+    return val;
+  });
+
+  if (expectedText == null || expectedText === '') {
+    throw new Error('Expected text argument is missing or empty');
+  }
+
+  const normalize = (s: string) => s.replace(/\s+/g, ' ').trim().toLowerCase();
+
+  async function resolveText(): Promise<string> {
+    const candidates = [
+      () => c.getText(xpath),
+      () => c.getInputValue(xpath),
+    ];
+    for (const fn of candidates) {
+      try {
+        const val = await fn();
+        if (val) return normalize(val);
+      } catch (_) {}
+    }
+    return '';
+  }
+
+  const actualText = await resolveText();
+  const normalizedExpected = normalize(expectedText);
+
+  c.log(`XPath (raw): "${rawXpath}"`);
+  c.log(`XPath (resolved): "${xpath}"`);
   c.log(`Element text: "${actualText}"`);
-  c.log(`Checking for partial text: "${expectedText}"`);
+  c.log(`Checking for partial text: "${normalizedExpected}"`);
 
-  if (!actualText.includes(expectedText)) {
-    throw new Error(`Expected element to contain "${expectedText}" but got "${actualText}"`);
+  if (!actualText.includes(normalizedExpected)) {
+    throw new Error(`Expected element to contain "${normalizedExpected}" but got "${actualText}"`);
   }
 
-  c.log(`Validation passed: element contains "${expectedText}"`);
+  c.log(`Validation passed: element contains "${normalizedExpected}"`);
 }
