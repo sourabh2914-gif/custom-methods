@@ -16,16 +16,14 @@ export async function scrollUntilVisibleInContainer(ctx: WalnutContext) {
 
   const page = ctx.page;
 
-  // locator already has the resolved XPath (Walnut resolves $[varName] placeholders before
-  // creating ctx.locator). We call locator.count() fresh on each check — never hold a
-  // DOM element reference, so no "not attached to DOM" errors.
-  const isPresent = async (): Promise<boolean> => {
-    try { return (await locator.count()) > 0; } catch { return false; }
+  // Check if element is visible in the viewport (not just present in DOM)
+  const isVisible = async (): Promise<boolean> => {
+    try { return (await locator.count()) > 0 && await locator.first().isVisible(); } catch { return false; }
   };
 
-  // Short-circuit: already in DOM before any scrolling needed
-  if (await isPresent()) {
-    ctx.log('[ScrollUntilVisibleInContainer] Element already in DOM — done');
+  // Short-circuit: already visible before any scrolling needed
+  if (await isVisible()) {
+    ctx.log('[ScrollUntilVisibleInContainer] Element already visible — done');
     return;
   }
 
@@ -80,9 +78,10 @@ export async function scrollUntilVisibleInContainer(ctx: WalnutContext) {
       `scrollTop=${scrollTop}px scrollHeight=${scrollInfo.scrollHeight}px containerFound=${scrollInfo.containerFound}`
     );
 
-    // Stop as soon as the element appears in the DOM
-    if (await isPresent()) {
-      ctx.log('[ScrollUntilVisibleInContainer] Element found — stopping scroll');
+    // Stop as soon as the element becomes visible in the viewport
+    if (await isVisible()) {
+      ctx.log('[ScrollUntilVisibleInContainer] Element visible — scrolling into view and stopping');
+      try { await locator.first().scrollIntoViewIfNeeded(); } catch (_) {}
       return;
     }
 
@@ -117,8 +116,9 @@ export async function scrollUntilVisibleInContainer(ctx: WalnutContext) {
         `[ScrollUntilVisibleInContainer] Post-grace: rows=${rowCountRetry} scrollTop=${retryInfo.scrollTop}px`
       );
 
-      if (await isPresent()) {
-        ctx.log('[ScrollUntilVisibleInContainer] Element found after grace period — stopping scroll');
+      if (await isVisible()) {
+        ctx.log('[ScrollUntilVisibleInContainer] Element visible after grace period — scrolling into view and stopping');
+        try { await locator.first().scrollIntoViewIfNeeded(); } catch (_) {}
         return;
       }
 
