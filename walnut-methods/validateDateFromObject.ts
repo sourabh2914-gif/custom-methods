@@ -40,27 +40,30 @@ export async function validateDateFromObject(ctx: WalnutContext) {
   c.log(`Expected date (formatted): "${expectedFormatted}"`);
 
   // Read actual value from the date field.
-  // Try in order: inputValue() → getAttribute('value') → textContent()
+  // The field may be a read-only wrapper — use evaluate() to extract
+  // value or innerText from the element or its first input/div descendant.
   let actualText: string = '';
+
+  const extractDate = async (el: any): Promise<string> => {
+    return el.evaluate((node: Element) => {
+      // 1. If it's an input, return its value
+      if ((node as HTMLInputElement).value !== undefined && (node as HTMLInputElement).tagName === 'INPUT') {
+        return (node as HTMLInputElement).value;
+      }
+      // 2. Check for a nested input
+      const input = node.querySelector('input');
+      if (input && input.value) return input.value;
+      // 3. Fall back to innerText / textContent
+      return (node as HTMLElement).innerText?.trim() || node.textContent?.trim() || '';
+    });
+  };
+
   if (typeof locator === 'string') {
-    actualText = (await c.getInputValue(locator)).trim();
-    if (!actualText) {
-      actualText = ((await c.getAttribute(locator, 'value')) ?? '').trim();
-    }
-    if (!actualText) {
-      actualText = ((await c.getText(locator)) ?? '').trim();
-    }
+    // Use Playwright page to get the element handle
+    const el = c.page.locator(locator).first();
+    actualText = (await extractDate(el)).trim();
   } else {
-    // Playwright Locator object
-    try {
-      actualText = (await locator.inputValue()).trim();
-    } catch (_) {}
-    if (!actualText) {
-      actualText = ((await locator.getAttribute('value')) ?? '').trim();
-    }
-    if (!actualText) {
-      actualText = ((await locator.textContent()) ?? '').trim();
-    }
+    actualText = (await extractDate(locator)).trim();
   }
 
   c.log(`Actual date on screen: "${actualText}"`);
