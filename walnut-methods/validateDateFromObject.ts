@@ -39,17 +39,27 @@ export async function validateDateFromObject(ctx: WalnutContext) {
 
   c.log(`Expected date (formatted): "${expectedFormatted}"`);
 
-  // Read actual value from the read-only date field
-  // Input fields store date as value attribute, not textContent — try inputValue() first
+  // Read actual value from the date field.
+  // Try in order: inputValue() → getAttribute('value') → textContent()
   let actualText: string = '';
   if (typeof locator === 'string') {
     actualText = (await c.getInputValue(locator)).trim();
+    if (!actualText) {
+      actualText = ((await c.getAttribute(locator, 'value')) ?? '').trim();
+    }
+    if (!actualText) {
+      actualText = ((await c.getText(locator)) ?? '').trim();
+    }
   } else {
-    // Playwright Locator object — try inputValue(), fall back to textContent()
+    // Playwright Locator object
     try {
       actualText = (await locator.inputValue()).trim();
-    } catch (_) {
-      actualText = (await locator.textContent() ?? '').trim();
+    } catch (_) {}
+    if (!actualText) {
+      actualText = ((await locator.getAttribute('value')) ?? '').trim();
+    }
+    if (!actualText) {
+      actualText = ((await locator.textContent()) ?? '').trim();
     }
   }
 
