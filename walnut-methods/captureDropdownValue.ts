@@ -9,39 +9,24 @@ import type { WalnutContext } from './walnut';
  * category: Forms
  */
 export async function captureDropdownValue(ctx: WalnutContext) {
-  const c = ctx as any;
-  const outputVar = c.args[0];
-  const locator = c.locator;
+  const c: any = ctx;
+  const outputVar: string = c.args[0];
+  const locator: any = c.locator;
 
-  c.log('Locator type: ' + typeof locator);
-
-  let value: string = '';
+  let value = '';
 
   if (typeof locator === 'string') {
-    try {
-      value = (await c.getText(locator) || '').trim();
-    } catch (_) {}
-
+    try { value = (await c.getText(locator) ?? '').trim(); } catch (_) {}
     if (!value) {
-      try {
-        value = (await c.getInputValue(locator) || '').trim();
-      } catch (_) {}
+      try { value = (await c.getInputValue(locator) ?? '').trim(); } catch (_) {}
     }
   } else {
-    try {
-      value = (await locator.textContent() || '').trim();
-    } catch (_) {}
-
+    try { value = (await locator.textContent() ?? '').trim(); } catch (_) {}
     if (!value) {
-      try {
-        value = (await locator.inputValue() || '').trim();
-      } catch (_) {}
+      try { value = (await locator.inputValue() ?? '').trim(); } catch (_) {}
     }
-
     if (!value) {
-      try {
-        value = (await locator.innerText() || '').trim();
-      } catch (_) {}
+      try { value = (await locator.innerText() ?? '').trim(); } catch (_) {}
     }
   }
 
@@ -49,13 +34,6 @@ export async function captureDropdownValue(ctx: WalnutContext) {
     throw new Error('Dropdown value is empty. Ensure the dropdown has a selected value before this step.');
   }
 
-  // Remove non-printable and symbol characters, keep word chars, spaces, and common punctuation
-  const cleaned = value
-    .replace(/[^\w\s().,'\-\/]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  c.log('Captured dropdown value (raw): ' + value);
-  c.log('Captured dropdown value (cleaned): ' + cleaned);
-  c.setVariable(outputVar, cleaned);
+  c.log('Captured dropdown value: ' + value);
+  c.setVariable(outputVar, value);
 }
