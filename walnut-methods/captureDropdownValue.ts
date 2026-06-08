@@ -63,8 +63,8 @@ export async function captureDropdownValue(ctx: WalnutContext) {
   // Strip UI symbols (×, ✕, ✗, ×, close-button chars) that appear in multi-select tag chips.
   // Keep only printable word characters, spaces, parentheses, hyphens, commas, dots, and slashes.
   const cleaned = value
-    .replace(/[^\w\s().,''\-\/]/gu, '')  // remove symbols like × ✕ ✗ etc.
-    .replace(/\s+/g, ' ')               // collapse multiple spaces
+    .replace(/[^\w\s().,'\-\/]/g, '')  // remove symbols like × ✕ ✗ etc.
+    .replace(/\s+/g, ' ')              // collapse multiple spaces
     .trim();
 
   c.log(`Captured dropdown value (raw):     "${value}"`);
