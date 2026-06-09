@@ -2,23 +2,42 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Get Date And Store
- * description: Get current system date in format ${dateFormat} and store padded in $[paddedDate] and unpadded in $[unpaddedDate]
+ * description: Get system date in format ${dateFormat} and store padded in $[paddedDate] and unpadded in $[unpaddedDate]
  * actionType: custom_get_date_and_store
  * context: shared
  * needsLocator: false
  * category: Data Processing
  */
 export async function getDateAndStore(ctx: WalnutContext) {
-  // ctx.args[0] = value of ${dateFormat}      — e.g. "MM/DD/YYYY", "DD-MM-YYYY", "YYYY-MM-DD"
-  // ctx.args[1] = name from $[paddedDate]     — runtime variable for zero-padded date  e.g. "01-01-2004"
-  // ctx.args[2] = name from $[unpaddedDate]   — runtime variable for non-padded date   e.g. "1-1-2004"
+  // ctx.args[0] = value of ${dateFormat}
+  //   — format only:           "DD-MM-YYYY"        → current date
+  //   — format with offset:    "DD-MM-YYYY +1"     → tomorrow
+  //                            "DD-MM-YYYY +2"     → day after tomorrow
+  //                            "DD-MM-YYYY -1"     → yesterday
+  // ctx.args[1] = name from $[paddedDate]    — stores zero-padded date  e.g. "09-06-2026"
+  // ctx.args[2] = name from $[unpaddedDate]  — stores non-padded date   e.g. "9-6-2026"
 
-  const format          = String(ctx.args[0] ?? 'DD-MM-YYYY').trim();
+  const rawInput        = String(ctx.args[0] ?? 'DD-MM-YYYY').trim();
   const paddedVarName   = String(ctx.args[1]);
   const unpaddedVarName = String(ctx.args[2]);
 
-  // Always use the current system date
+  // Split "DD-MM-YYYY +1" into format="DD-MM-YYYY" and offset=1
+  // Matches optional trailing whitespace + sign + digits at the end
+  const offsetMatch = rawInput.match(/^(.*?)\s*([+-]\s*\d+)\s*$/);
+  let format: string;
+  let offset: number;
+
+  if (offsetMatch) {
+    format = offsetMatch[1].trim();
+    offset = parseInt(offsetMatch[2].replace(/\s/g, ''), 10);
+  } else {
+    format = rawInput;
+    offset = 0;
+  }
+
+  // Compute the target date
   const date = new Date();
+  date.setDate(date.getDate() + offset);
 
   // Zero-padded components
   const dd   = String(date.getDate()).padStart(2, '0');
@@ -46,12 +65,13 @@ export async function getDateAndStore(ctx: WalnutContext) {
       .replace('DD',   padded ? dd : d);
   }
 
-  const paddedFormatted   = applyFormat(true);   // e.g. "01-06-2026"
-  const unpaddedFormatted = applyFormat(false);  // e.g. "1-6-2026"
+  const paddedFormatted   = applyFormat(true);   // e.g. "09-06-2026"
+  const unpaddedFormatted = applyFormat(false);  // e.g. "9-6-2026"
 
-  ctx.log(`[GetDateAndStore] system date → padded: "${paddedFormatted}", unpadded: "${unpaddedFormatted}" (format: "${format}")`);
-  ctx.log(`[GetDateAndStore] Storing "${paddedFormatted}" → $[${paddedVarName}]`);
-  ctx.log(`[GetDateAndStore] Storing "${unpaddedFormatted}" → $[${unpaddedVarName}]`);
+  const label = offset === 0 ? 'today' : `today${offset > 0 ? '+' : ''}${offset}`;
+  ctx.log(`[GetDateAndStore] input: "${rawInput}" → format: "${format}", offset: ${offset} (${label})`);
+  ctx.log(`[GetDateAndStore] padded: "${paddedFormatted}" → $[${paddedVarName}]`);
+  ctx.log(`[GetDateAndStore] unpadded: "${unpaddedFormatted}" → $[${unpaddedVarName}]`);
 
   ctx.setVariable(paddedVarName, paddedFormatted);
   ctx.setVariable(unpaddedVarName, unpaddedFormatted);
