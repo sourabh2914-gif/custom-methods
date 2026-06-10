@@ -22,14 +22,22 @@ export async function getDateAndStore(ctx: WalnutContext) {
   const unpaddedVarName = String(ctx.args[2]);
 
   // Split "DD-MM-YYYY +1" into format="DD-MM-YYYY" and offset=1
-  // Matches optional trailing whitespace + sign + digits at the end
-  const offsetMatch = rawInput.match(/^(.*?)\s*([+-]\s*\d+)\s*$/);
+  // The offset token is the LAST whitespace-separated token if it looks like +N or -N.
+  // Examples:
+  //   "DD-MM-YYYY"        → format="DD-MM-YYYY", offset=0
+  //   "DD-MM-YYYY +1"     → format="DD-MM-YYYY", offset=+1
+  //   "DD-MM-YYYY +2"     → format="DD-MM-YYYY", offset=+2
+  //   "DD-MM-YYYY -3"     → format="DD-MM-YYYY", offset=-3
+  //   "DD/MM/YYYY +5"     → format="DD/MM/YYYY", offset=+5
+  const tokens = rawInput.split(/\s+/);
+  const lastToken = tokens[tokens.length - 1] ?? '';
   let format: string;
   let offset: number;
 
-  if (offsetMatch) {
-    format = offsetMatch[1].trim();
-    offset = parseInt(offsetMatch[2].replace(/\s/g, ''), 10);
+  if (/^[+-]\d+$/.test(lastToken)) {
+    // Last token is a signed integer offset — everything before it is the format
+    format = tokens.slice(0, -1).join(' ').trim();
+    offset = parseInt(lastToken, 10);
   } else {
     format = rawInput;
     offset = 0;
