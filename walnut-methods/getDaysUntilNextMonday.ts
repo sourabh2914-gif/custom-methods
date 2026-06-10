@@ -1,43 +1,81 @@
 import type { WalnutContext } from './walnut';
 
 /** @walnut_method
- * name: Get Days Until Next Monday
- * description: Calculate the number of days from today until the next Monday and store in $[daysUntilMonday]
- * actionType: custom_get_days_until_next_monday
+ * name: Get Next Week Day Date
+ * description: Calculate the date of next ${dayName} and store in $[nextDayDate]
+ * actionType: custom_get_next_week_day_date
  * context: shared
  * needsLocator: false
  * category: Data Processing
  */
-export async function getDaysUntilNextMonday(ctx: WalnutContext) {
-  // ctx.args[0] = value of $[daysUntilMonday] — the runtime variable name to store the result in
-  //
-  // Logic:
-  //   JS getDay() returns: 0=Sun, 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat
-  //   Days until next Monday = (8 - currentDay) % 7, but if today IS Monday → 7 (next week's Monday)
-  //
-  // Examples:
-  //   Tuesday  (2) → (8 - 2) % 7 = 6
-  //   Wednesday(3) → (8 - 3) % 7 = 5
-  //   Thursday (4) → (8 - 4) % 7 = 4
-  //   Friday   (5) → (8 - 5) % 7 = 3
-  //   Saturday (6) → (8 - 6) % 7 = 2
-  //   Sunday   (0) → (8 - 0) % 7 = 1
-  //   Monday   (1) → (8 - 1) % 7 = 0 → treated as 7 (next Monday)
+export async function getNextWeekDayDate(ctx: WalnutContext) {
+  // ctx.args[0] = value of ${dayName}     — e.g. "Monday", "Wednesday", "Fri"
+  // ctx.args[1] = value of $[nextDayDate] — runtime variable name to store the result
 
-  const outputVarName = ctx.args[0]; // e.g. "daysUntilMonday"
+  const dayNameInput = String(ctx.args[0] ?? '').trim();
+  const outputVar    = ctx.args[1]; // e.g. "nextDayDate"
 
-  const today = new Date();
-  const currentDay = today.getDay(); // 0 (Sun) … 6 (Sat)
+  // ── Step 1: Resolve the target day index (0=Sun,1=Mon,...,6=Sat) ──
+  const dayMap: Record<string, number> = {
+    sunday: 0, sun: 0,
+    monday: 1, mon: 1,
+    tuesday: 2, tue: 2,
+    wednesday: 3, wed: 3,
+    thursday: 4, thu: 4,
+    friday: 5, fri: 5,
+    saturday: 6, sat: 6,
+  };
 
-  let daysUntil = (8 - currentDay) % 7;
-  if (daysUntil === 0) {
-    daysUntil = 7; // today is Monday → next Monday is 7 days away
+  const targetDayIndex = dayMap[dayNameInput.toLowerCase()];
+  if (targetDayIndex === undefined) {
+    throw new Error(
+      `[GetNextWeekDayDate] Invalid day name: "${dayNameInput}". ` +
+      `Use a full name like "Monday", "Wednesday", or abbreviation like "Mon", "Wed".`
+    );
   }
 
-  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  // ── Step 2: Get today's date in Indian Standard Time (IST = UTC+5:30) ──
+  // Use Intl to extract the current day/date in IST regardless of server timezone.
+  const nowUtc = new Date();
+  const istFormatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    weekday: 'short',
+  });
+  const parts = istFormatter.formatToParts(nowUtc);
+  const get = (type: string) => parts.find(p => p.type === type)?.value ?? '';
+
+  // Build a plain Date at midnight IST so getDay() is correct
+  const istDateStr = `${get('year')}-${get('month')}-${get('day')}`;
+  const today      = new Date(istDateStr + 'T00:00:00'); // local midnight, but we only need getDay()
+  const currentDay = today.getDay(); // 0=Sun … 6=Sat (in IST)
+
+  ctx.log(`[GetNextWeekDayDate] IST today: ${istDateStr} (${get('weekday')})`);
+
+  // ── Step 3: Calculate the NEXT occurrence of that day ──
+  // Formula: ((targetDayIndex - currentDay + 7) % 7) || 7
+  //   - If target is ahead or later this week: gives days until that day (1–6) ✓
+  //   - If target is the same as today: % 7 = 0 → fallback to 7 (same day next week) ✓
+  //   e.g. today=Tue(2), target=Mon(1) → (1-2+7)%7 = 6 → next Monday in 6 days ✓
+  //        today=Tue(2), target=Wed(3) → (3-2+7)%7 = 1 → next Wednesday tomorrow ✓
+  //        today=Tue(2), target=Tue(2) → (2-2+7)%7 = 0 → fallback 7 → same day next week ✓
+  const daysToTarget = ((targetDayIndex - currentDay + 7) % 7) || 7;
+
+  const targetDate = new Date(today);
+  targetDate.setDate(today.getDate() + daysToTarget);
+
+  const dayNames   = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+  const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+  const dd    = String(targetDate.getDate()).padStart(2, '0');
+  const mm    = String(targetDate.getMonth() + 1).padStart(2, '0');
+  const yyyy  = targetDate.getFullYear();
+  const dateString = `${dd}/${mm}/${yyyy}`; // e.g. "16/06/2026"
+
   ctx.log(
-    `[GetDaysUntilNextMonday] Today is ${dayNames[currentDay]} → next Monday is in ${daysUntil} day(s) → stored in $[${outputVarName}]`
+    `[GetNextWeekDayDate] Requested: next ${dayNameInput}. ` +
+    `Resolved to ${dayNames[targetDayIndex]} ${targetDate.getDate()} ${monthNames[targetDate.getMonth()]} ${yyyy} → ${dateString}`
   );
 
-  ctx.setVariable(outputVarName, String(daysUntil));
+  ctx.setVariable(outputVar, dateString);
 }
