@@ -2,14 +2,16 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Click Available Time Slot
- * description: Click the first available time slot and store in $[selectedSlot]
+ * description: Click the first available time slot and store in $[selectedSlot], store first morning slot in $[firstSlot] and last evening/afternoon slot in $[lastSlot]
  * actionType: custom_click_available_time_slot
  * context: web
  * needsLocator: false
  * category: Forms
  */
 export async function clickAvailableTimeSlot(ctx: WalnutContext) {
-  // ctx.args[0] = "selectedSlot" (from $[selectedSlot]) — runtime variable name
+  // ctx.args[0] = "selectedSlot" (from $[selectedSlot]) — clicked slot runtime variable name
+  // ctx.args[1] = "firstSlot"    (from $[firstSlot])    — first morning slot (faded or unfaded)
+  // ctx.args[2] = "lastSlot"     (from $[lastSlot])     — last evening slot (fallback: last afternoon slot)
   //
   // Supports two DOM variants:
   //
@@ -32,17 +34,24 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
   //   </div>
   //   Section tabs: <button class="flex-1 flex items-center ..."><img ...>"Evening"</button>
   //
-  // Available slot = button NOT disabled + has cursor-pointer class (both variants)
-  // Disabled slot  = button has @disabled attribute
+  // Available (clickable) slot = button NOT disabled + has cursor-pointer class (both variants)
+  // Faded/disabled slot        = button has @disabled attribute (captured for firstSlot/lastSlot)
   //
   // Logic:
-  //   1. Try Morning  → click tab if not active → find first non-disabled slot → click it
+  //   1. Try Morning  → click tab if not active → find first non-disabled future slot → click it
   //   2. No slots in Morning → try Afternoon
   //   3. No slots in Afternoon → try Evening
-  //   4. Throw if no slot found in any section
+  //   4. Throw if no clickable slot found in any section
+  //
+  // firstSlot / lastSlot capture (independent of click logic):
+  //   - firstSlot = first future slot in Morning (faded or unfaded)
+  //   - lastSlot  = last future slot in Evening (faded or unfaded);
+  //                 if Evening has no slots, use last future slot in Afternoon
 
   const c = ctx as any;
-  const outputVar = ctx.args[0]; // from $[selectedSlot]
+  const outputVar  = ctx.args[0]; // from $[selectedSlot]
+  const firstSlotVar = ctx.args[1]; // from $[firstSlot]
+  const lastSlotVar  = ctx.args[2]; // from $[lastSlot]
 
   const sections = ['Morning', 'Afternoon', 'Evening'];
 
@@ -55,16 +64,19 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       ` or (contains(normalize-space(.),'${label}') and not(.//span))` +
     `]`;
 
-  // Available slot XPath — two variants tried in order:
-  //   Variant A: slots inside grid-cols-3
-  //   Variant B: slots in div.relative that do NOT have grid-cols-3 ancestor
-  // Unified: any button that is not disabled, has cursor-pointer, and has time-like text
-  // Anchored under the nearest common slot container after tab activation
+  // XPath for clickable (non-disabled) slots only — used for the click action
   const availableSlotXpath =
     `//button[` +
       `not(@disabled)` +
       ` and contains(@class,'cursor-pointer')` +
       ` and contains(normalize-space(text()),':')` +   // time slots contain ":" e.g. "10:00 AM"
+    `]`;
+
+  // XPath for ALL slots (faded/disabled included) — used for firstSlot/lastSlot capture
+  const allSlotsXpath =
+    `//button[` +
+      `contains(normalize-space(text()),':')` +        // time slots contain ":" e.g. "10:00 AM"
+      ` and (contains(@class,'cursor-pointer') or contains(@class,'cursor-not-allowed') or @disabled)` +
     `]`;
 
   // Current system time in minutes-since-midnight (used to skip past slots)
@@ -92,6 +104,98 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
     }
     return hours * 60 + minutes;
   }
+
+  /**
+   * Activate a section tab and collect all future slots (faded + unfaded) visible in that section.
+   * Returns the list of slot texts (in DOM order), or empty array if tab not found / disabled.
+   * Restores the previously active tab afterwards only if `restoreTab` is true.
+   */
+  async function collectAllFutureSlotsInSection(section: string): Promise<string[]> {
+    const tabXpath = findTabXpath(section);
+
+    const tabState: { exists: boolean; isDisabled: boolean; isActive: boolean } =
+      await c.page.evaluate((xp: string) => {
+        const result = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+        const el = result.singleNodeValue as HTMLElement | null;
+        if (!el) return { exists: false, isDisabled: false, isActive: false };
+        const isDisabled = el.hasAttribute('disabled');
+        const classes = el.className || '';
+        const isActive =
+          classes.includes('font-bold') ||
+          classes.includes('border-b') ||
+          (classes.includes('text-gray-900') && !classes.includes('text-gray-400')) ||
+          (!classes.includes('text-gray-400') && classes.includes('flex-1'));
+        return { exists: true, isDisabled, isActive };
+      }, tabXpath);
+
+    if (!tabState.exists || tabState.isDisabled) return [];
+
+    if (!tabState.isActive) {
+      await c.page.locator(`xpath=${tabXpath}`).first().click();
+      await c.wait(600);
+    }
+
+    const rawSlots: string[] = await c.page.evaluate((xp: string) => {
+      const result = document.evaluate(xp, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+      const texts: string[] = [];
+      for (let i = 0; i < result.snapshotLength; i++) {
+        const el = result.snapshotItem(i) as HTMLElement | null;
+        if (!el) continue;
+        const text = (el.textContent ?? '').trim();
+        if (text) texts.push(text);
+      }
+      return texts;
+    }, allSlotsXpath);
+
+    // Keep only future slots (start time > now)
+    return rawSlots.filter(text => {
+      const startMin = parseSlotStartMinutes(text);
+      if (startMin === null) return false;
+      return startMin > nowMinutes;
+    });
+  }
+
+  // ── Phase 1: Capture firstSlot (Morning) and lastSlot (Evening, fallback Afternoon) ──────────
+
+  ctx.log('Phase 1: Collecting first/last slots across sections...');
+
+  const morningSlotsAll = await collectAllFutureSlotsInSection('Morning');
+  ctx.log(`Morning future slots (all): ${morningSlotsAll.length}`);
+
+  const afternoonSlotsAll = await collectAllFutureSlotsInSection('Afternoon');
+  ctx.log(`Afternoon future slots (all): ${afternoonSlotsAll.length}`);
+
+  const eveningSlotsAll = await collectAllFutureSlotsInSection('Evening');
+  ctx.log(`Evening future slots (all): ${eveningSlotsAll.length}`);
+
+  // firstSlot = first future slot in Morning (faded or unfaded)
+  const firstSlotText = morningSlotsAll.length > 0 ? morningSlotsAll[0] : null;
+
+  // lastSlot = last future slot in Evening; if none, fallback to last in Afternoon
+  const lastSlotText =
+    eveningSlotsAll.length > 0
+      ? eveningSlotsAll[eveningSlotsAll.length - 1]
+      : afternoonSlotsAll.length > 0
+        ? afternoonSlotsAll[afternoonSlotsAll.length - 1]
+        : null;
+
+  if (firstSlotText && firstSlotVar) {
+    ctx.setVariable(firstSlotVar, firstSlotText);
+    ctx.log(`Stored first morning slot "${firstSlotText}" → $[${firstSlotVar}]`);
+  } else if (!firstSlotText) {
+    ctx.log('No future morning slots found — $[firstSlot] not set');
+  }
+
+  if (lastSlotText && lastSlotVar) {
+    ctx.setVariable(lastSlotVar, lastSlotText);
+    ctx.log(`Stored last slot "${lastSlotText}" → $[${lastSlotVar}]`);
+  } else if (!lastSlotText) {
+    ctx.log('No future afternoon/evening slots found — $[lastSlot] not set');
+  }
+
+  // ── Phase 2: Click logic — first future non-disabled slot (Morning → Afternoon → Evening) ────
+
+  ctx.log('Phase 2: Clicking first available (non-disabled) future slot...');
 
   for (const section of sections) {
     ctx.log(`Checking section: ${section}`);
@@ -140,7 +244,7 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       ctx.log(`Section "${section}" is already active`);
     }
 
-    // Collect ALL available (unfaded) slots in this section
+    // Collect ALL available (non-disabled) slots in this section
     const allSlots: { text: string; index: number }[] = await c.page.evaluate((xp: string) => {
       const result = document.evaluate(xp, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
       const slots: { text: string; index: number }[] = [];
