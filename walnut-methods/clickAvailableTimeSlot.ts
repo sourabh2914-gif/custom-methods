@@ -44,7 +44,8 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
   //   4. Throw if no clickable slot found in any section
   //
   // firstSlot / lastSlot capture (independent of click logic):
-  //   - firstSlot = first future slot in Morning (faded or unfaded)
+  //   - firstSlot = first slot in Morning (faded or unfaded), NO time filter — always the very
+  //                 first morning slot regardless of whether the morning has passed
   //   - lastSlot  = last future slot in Evening (faded or unfaded);
   //                 if Evening has no slots, use last future slot in Afternoon
 
@@ -106,9 +107,53 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
   }
 
   /**
+   * Activate a section tab and collect ALL slots (faded + unfaded) with NO time filter.
+   * Used exclusively for Morning firstSlot capture — even if morning has already passed.
+   */
+  async function collectAllSlotsInSection(section: string): Promise<string[]> {
+    const tabXpath = findTabXpath(section);
+
+    const tabState: { exists: boolean; isDisabled: boolean; isActive: boolean } =
+      await c.page.evaluate((xp: string) => {
+        const result = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+        const el = result.singleNodeValue as HTMLElement | null;
+        if (!el) return { exists: false, isDisabled: false, isActive: false };
+        const isDisabled = el.hasAttribute('disabled');
+        const classes = el.className || '';
+        const isActive =
+          classes.includes('font-bold') ||
+          classes.includes('border-b') ||
+          (classes.includes('text-gray-900') && !classes.includes('text-gray-400')) ||
+          (!classes.includes('text-gray-400') && classes.includes('flex-1'));
+        return { exists: true, isDisabled, isActive };
+      }, tabXpath);
+
+    if (!tabState.exists || tabState.isDisabled) return [];
+
+    if (!tabState.isActive) {
+      await c.page.locator(`xpath=${tabXpath}`).first().click();
+      await c.wait(600);
+    }
+
+    const rawSlots: string[] = await c.page.evaluate((xp: string) => {
+      const result = document.evaluate(xp, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+      const texts: string[] = [];
+      for (let i = 0; i < result.snapshotLength; i++) {
+        const el = result.snapshotItem(i) as HTMLElement | null;
+        if (!el) continue;
+        const text = (el.textContent ?? '').trim();
+        if (text) texts.push(text);
+      }
+      return texts;
+    }, allSlotsXpath);
+
+    // No time filter — return all slots as-is
+    return rawSlots;
+  }
+
+  /**
    * Activate a section tab and collect all future slots (faded + unfaded) visible in that section.
    * Returns the list of slot texts (in DOM order), or empty array if tab not found / disabled.
-   * Restores the previously active tab afterwards only if `restoreTab` is true.
    */
   async function collectAllFutureSlotsInSection(section: string): Promise<string[]> {
     const tabXpath = findTabXpath(section);
@@ -159,8 +204,10 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
 
   ctx.log('Phase 1: Collecting first/last slots across sections...');
 
-  const morningSlotsAll = await collectAllFutureSlotsInSection('Morning');
-  ctx.log(`Morning future slots (all): ${morningSlotsAll.length}`);
+  // firstSlot uses NO time filter — switch to Morning tab and grab the very first slot
+  // even if the morning section has already passed (e.g. it's now afternoon)
+  const morningSlotsRaw = await collectAllSlotsInSection('Morning');
+  ctx.log(`Morning slots (no time filter): ${morningSlotsRaw.length}`);
 
   const afternoonSlotsAll = await collectAllFutureSlotsInSection('Afternoon');
   ctx.log(`Afternoon future slots (all): ${afternoonSlotsAll.length}`);
@@ -168,8 +215,8 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
   const eveningSlotsAll = await collectAllFutureSlotsInSection('Evening');
   ctx.log(`Evening future slots (all): ${eveningSlotsAll.length}`);
 
-  // firstSlot = first future slot in Morning (faded or unfaded)
-  const firstSlotText = morningSlotsAll.length > 0 ? morningSlotsAll[0] : null;
+  // firstSlot = first slot in Morning (faded or unfaded), no time filter
+  const firstSlotText = morningSlotsRaw.length > 0 ? morningSlotsRaw[0] : null;
 
   // lastSlot = last future slot in Evening; if none, fallback to last in Afternoon
   const lastSlotText =
