@@ -10,30 +10,56 @@ import type { WalnutContext } from './walnut';
  */
 export async function clickAppointmentBySlot(ctx: WalnutContext) {
   // ctx.args[0] = "selectedslot" (from $[selectedslot]) — runtime variable holding slot time range
-  //               e.g. "03:30 PM – 04:00 PM"
   //
-  // DOM structure of each appointment card:
-  //   <div class="w-full h-full flex items-start gap-2 p-2">
-  //     <div class="h-7 w-7 ...">   ← avatar / initials
-  //     <div class="min-w-0 flex-1 flex flex-col gap-0.5">
-  //       <p class="text-[12px] font-semibold ...">Tarulata Venkataraman</p>
-  //       <p class="text-[10px] leading-tight" style="...opacity: 0.7;">
-  //         "2:30 PM"
-  //         " – "
-  //         "3:00 PM"
-  //       </p>
+  // Supports TWO DOM variants:
+  //
+  // ── Old DOM (12-hour format, AM/PM) ───────────────────────────────────────────────────────────
+  //   Card container: <div class="cursor-pointer w-full h-full">
+  //     <div class="w-full h-full flex items-start gap-2 p-2">
+  //       <div class="h-7 w-7 ...">TV</div>
+  //       <div class="min-w-0 flex-1 flex flex-col gap-0.5">
+  //         <p class="text-[12px] font-semibold ...">Tarulata Venkataraman</p>
+  //         <p class="text-[10px] leading-tight" style="...opacity: 0.7;">
+  //           "2:30 PM"
+  //           " – "
+  //           "3:00 PM"
+  //         </p>
+  //       </div>
   //     </div>
   //   </div>
+  //   Slot variable format: "03:30 PM – 04:00 PM"  (leading zero stripped → "3:30 PM – 4:00 PM")
   //
-  // The slot variable may be formatted as "03:30 PM – 04:00 PM" (with leading zero) while
-  // the DOM renders "3:30 PM – 4:00 PM" (no leading zero) — normalization handles both.
+  // ── New DOM (24-hour format, no AM/PM) ────────────────────────────────────────────────────────
+  //   Time label column: <span class="-rotate-90 text-[11px] text-text-gray ...">16:00</span>
+  //   Card container: <div class="cursor-pointer w-full h-full">
+  //     <div class="rounded-2xl border shadow-sm p-1.5 flex items-center gap-2 w-full h-full overflow-hidden ...">
+  //       <div class="relative flex-shrink-0"> ... </div>
+  //       <div class="min-w-0 flex-1">
+  //         <p class="text-xs font-semibold text-text-color truncate">Krish krishna</p>
+  //         <div class="flex items-center gap-1 flex-wrap">
+  //           <span class="text-[9px] font-bold px-1.5 py-0.5 rounded-full ...">Nurse Navigator</span>
+  //         </div>
+  //         <p class="text-[10px] text-text-gray">
+  //           "16:00"
+  //           " – "
+  //           "16:30"
+  //         </p>
+  //       </div>
+  //     </div>
+  //   </div>
+  //   Slot variable format: "16:00 – 16:30"  (24-hour, no AM/PM)
+  //
+  // Detection strategy:
+  //   - If slot contains AM/PM → Old DOM → normalize leading zeros → match <p class="text-[10px] leading-tight ...">
+  //   - If slot is 24-hour only → New DOM → match <p class="text-[10px] text-text-gray">
+  //   - Both variants: walk up from matched <p> to find <div class="cursor-pointer ..."> and click
   //
   // Steps:
-  //   1. Read the slot value from the runtime variable
-  //   2. Normalize the time format (strip leading zeros from hour part)
-  //   3. Capture the current text of the appointment detail panel (to detect change)
-  //   4. Find and click the appointment card whose time text matches the slot
-  //   5. Wait for the detail panel text to change, confirming the click registered
+  //   1. Read slot value from runtime variable
+  //   2. Normalize time format for matching
+  //   3. Build candidate time strings (both 12h and 24h variants for cross-format tolerance)
+  //   4. Find and click the matching card using querySelector + XPath fallback
+  //   5. Poll for DOM text change to confirm details updated
 
   const c = ctx as any;
   const slotVarName = ctx.args[0]; // e.g. "selectedslot"
@@ -50,131 +76,207 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
 
   ctx.log(`Slot from $[${slotVarName}]: "${rawSlot}"`);
 
-  // ── Step 2: Normalize time format ─────────────────────────────────────────────────────────────
-  // "03:30 PM – 04:00 PM"  →  "3:30 PM – 4:00 PM"
-  // Strips leading zeros from each hour part so it matches DOM text nodes.
+  // ── Step 2: Normalize and build match candidates ───────────────────────────────────────────────
+  // We need to handle:
+  //   a) "03:30 PM – 04:00 PM"  →  normalize to "3:30 PM – 4:00 PM"  (old DOM, 12h)
+  //   b) "16:00 – 16:30"        →  keep as-is                         (new DOM, 24h)
+  //
+  // Also convert between formats so one stored value can match either DOM variant.
 
-  function normalizeTimeRange(timeRange: string): string {
-    return timeRange.replace(/\b0(\d)(:\d{2}\s*(?:AM|PM))/gi, '$1$2').trim();
+  const is12Hour = /\b(AM|PM)\b/i.test(rawSlot);
+
+  /** Strip leading zero from the hour part only: "03:30 PM" → "3:30 PM", "16:00" stays "16:00" */
+  function stripLeadingZero(time: string): string {
+    return time.replace(/\b0(\d)(:\d{2})/g, '$1$2');
   }
 
-  const normalizedSlot = normalizeTimeRange(rawSlot);
-  ctx.log(`Normalized slot: "${normalizedSlot}"`);
-
-  // Also build individual start/end parts for partial matching against text nodes
-  // e.g. "3:30 PM – 4:00 PM" → start="3:30 PM", end="4:00 PM"
-  const slotParts = normalizedSlot.split('–').map(s => s.trim());
-  const slotStart = slotParts[0] ?? '';
-  const slotEnd   = slotParts[1] ?? '';
-
-  ctx.log(`Slot start: "${slotStart}", end: "${slotEnd}"`);
-
-  // ── Step 3: Capture current appointment detail panel text ─────────────────────────────────────
-  // The detail panel is a sibling/parent area that shows full appointment info after a card click.
-  // We snapshot its text now so we can detect a change after clicking.
-  // Strategy: grab the outerText of the first element that likely holds appointment details.
-  // We look for a panel that is NOT the calendar grid (which contains the cards themselves).
-
-  const detailPanelSelector =
-    // Common patterns for a detail/side-panel area — adjust if DOM differs:
-    '[class*="detail"], [class*="panel"], [class*="sidebar"], [class*="appointment-info"]';
-
-  let beforeDetailText: string = '';
-  try {
-    beforeDetailText = await c.page.evaluate(() => {
-      // Try to find a dedicated detail panel; fall back to body text as a last resort
-      const candidates = [
-        document.querySelector('[class*="detail"]'),
-        document.querySelector('[class*="panel"]'),
-        document.querySelector('[class*="sidebar"]'),
-        document.querySelector('[class*="appointment-info"]'),
-      ].filter(Boolean);
-
-      if (candidates.length > 0 && candidates[0]) {
-        return (candidates[0] as HTMLElement).innerText ?? '';
-      }
-      return '';
-    });
-  } catch {
-    beforeDetailText = '';
+  /** Convert 12-hour "H:MM AM/PM" to 24-hour "HH:MM" */
+  function to24h(time: string): string {
+    const m = time.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+    if (!m) return time;
+    let h = parseInt(m[1], 10);
+    const min = m[2];
+    const period = m[3].toUpperCase();
+    if (period === 'AM' && h === 12) h = 0;
+    if (period === 'PM' && h !== 12) h += 12;
+    return `${String(h).padStart(2, '0')}:${min}`;
   }
 
-  ctx.log(`Detail panel text before click (${beforeDetailText.length} chars): "${beforeDetailText.slice(0, 80)}..."`);
+  /** Convert 24-hour "HH:MM" to 12-hour "H:MM AM/PM" */
+  function to12h(time: string): string {
+    const m = time.trim().match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) return time;
+    let h = parseInt(m[1], 10);
+    const min = m[2];
+    const period = h >= 12 ? 'PM' : 'AM';
+    if (h === 0) h = 12;
+    if (h > 12) h -= 12;
+    return `${h}:${min} ${period}`;
+  }
+
+  /** Normalize a time range string for DOM matching */
+  function normalizeRange(range: string): string {
+    return stripLeadingZero(range).replace(/\s*–\s*/g, ' – ').trim();
+  }
+
+  // Primary normalized form (matches the DOM variant the slot was captured from)
+  const normalizedSlot = normalizeRange(rawSlot);
+
+  // Split into start/end
+  const parts = rawSlot.split('–').map(s => s.trim());
+  const rawStart = parts[0] ?? '';
+  const rawEnd   = parts[1] ?? '';
+
+  // Build both 12h and 24h variants of start/end for cross-format tolerance
+  const start12 = is12Hour ? stripLeadingZero(rawStart) : to12h(rawStart);
+  const end12   = is12Hour ? stripLeadingZero(rawEnd)   : to12h(rawEnd);
+  const start24 = is12Hour ? to24h(rawStart)             : stripLeadingZero(rawStart);
+  const end24   = is12Hour ? to24h(rawEnd)               : stripLeadingZero(rawEnd);
+
+  const full12 = `${start12} – ${end12}`;
+  const full24 = `${start24} – ${end24}`;
+
+  ctx.log(`Match candidates — 12h: "${full12}", 24h: "${full24}"`);
+
+  // ── Step 3: Snapshot detail panel before click ────────────────────────────────────────────────
+  // Capture the current state of the right-side detail area to detect change after click.
+  // We snapshot the whole body's text as fallback since these apps use utility-class DOMs
+  // with no stable "detail panel" class name.
+
+  const beforeSnapshot: string = await c.page.evaluate(() => {
+    return document.body.innerText ?? '';
+  });
 
   // ── Step 4: Find and click the matching appointment card ──────────────────────────────────────
-  // XPath that finds the <p> time-text element inside a card whose concatenated text matches
-  // the slot. The text is split across text nodes, so we use contains() on the full text.
   //
-  // Strategy: find ANY <p> or <span> whose innerText (after trimming) contains both
-  // the start time AND the end time (or matches the normalized full range).
+  // Strategy A: querySelector scan — walk all <p> elements, match time text, then walk up
+  //             to <div class="cursor-pointer ..."> and click it.
+  //
+  // Strategy B: XPath fallback — same logic expressed in XPath if Strategy A finds nothing.
 
-  const clicked: boolean = await c.page.evaluate(
-    ({ start, end, full }: { start: string; end: string; full: string }) => {
-      // Walk all <p> elements — the time paragraph is <p class="text-[10px] ...">
+  const clickResult: { clicked: boolean; matched: string } = await c.page.evaluate(
+    ({ f12, f24, s12, e12, s24, e24 }: {
+      f12: string; f24: string;
+      s12: string; e12: string;
+      s24: string; e24: string;
+    }) => {
+      /**
+       * Collapse all whitespace/newlines in a string and trim.
+       * Text nodes inside <p> come as separate nodes; textContent joins them with
+       * any whitespace between — this collapses that.
+       */
+      function collapse(text: string): string {
+        return text.replace(/\s+/g, ' ').trim();
+      }
+
+      /** Check if a collapsed paragraph text matches any of our candidate ranges */
+      function isMatch(text: string): boolean {
+        // Exact full match (either format)
+        if (text === f12 || text === f24) return true;
+        // Both parts present in text (handles minor whitespace differences)
+        if (s12 && e12 && text.includes(s12) && text.includes(e12)) return true;
+        if (s24 && e24 && text.includes(s24) && text.includes(e24)) return true;
+        return false;
+      }
+
+      /** Walk up from a matched element to find the cursor-pointer clickable container */
+      function findClickable(el: HTMLElement): HTMLElement {
+        let cur: HTMLElement | null = el;
+        while (cur) {
+          if (cur.classList.contains('cursor-pointer')) return cur;
+          cur = cur.parentElement;
+        }
+        // Fallback: walk up to find any div with w-full
+        cur = el;
+        while (cur) {
+          if (cur.tagName === 'DIV' && cur.classList.contains('w-full')) return cur;
+          cur = cur.parentElement;
+        }
+        return el;
+      }
+
+      // ── Variant A & B: scan all <p> tags ──────────────────────────────────────────────────────
+      // Old DOM: <p class="text-[10px] leading-tight" ...>
+      // New DOM: <p class="text-[10px] text-text-gray">
       const paragraphs = Array.from(document.querySelectorAll('p'));
       for (const p of paragraphs) {
-        const text = (p.textContent ?? '').replace(/\s+/g, ' ').trim();
-        // Match if the paragraph contains both parts of the slot time range
-        const matchesFull  = text === full;
-        const matchesParts = start && end
-          ? text.includes(start) && text.includes(end)
-          : text.includes(full);
-
-        if (matchesFull || matchesParts) {
-          // Walk up to find the clickable card container (has w-full and flex)
-          let el: HTMLElement | null = p;
-          while (el && !el.matches('[class*="w-full"][class*="flex"]')) {
-            el = el.parentElement;
-          }
-          const target = (el ?? p) as HTMLElement;
+        const text = collapse(p.textContent ?? '');
+        if (isMatch(text)) {
+          const target = findClickable(p as HTMLElement);
           target.click();
-          return true;
+          return { clicked: true, matched: text };
         }
       }
-      return false;
+
+      return { clicked: false, matched: '' };
     },
-    { start: slotStart, end: slotEnd, full: normalizedSlot }
+    { f12: full12, f24: full24, s12: start12, e12: end12, s24: start24, e24: end24 }
   );
 
-  if (!clicked) {
-    // Fallback: try XPath approach with text node matching
-    ctx.log('Direct querySelector approach found no match — trying XPath fallback...');
+  if (!clickResult.clicked) {
+    // ── XPath fallback ─────────────────────────────────────────────────────────────────────────
+    ctx.log('querySelector scan found no match — trying XPath fallback...');
 
-    const xpathFound: boolean = await c.page.evaluate(
-      ({ start, end }: { start: string; end: string }) => {
-        // XPath: find a <p> that contains a text node with slotStart AND another with slotEnd
-        const xp = `//p[contains(normalize-space(.), '${start}') and contains(normalize-space(.), '${end}')]`;
-        const result = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
-        const p = result.singleNodeValue as HTMLElement | null;
-        if (!p) return false;
-
-        let el: HTMLElement | null = p;
-        while (el && !el.matches('[class*="w-full"][class*="flex"]')) {
-          el = el.parentElement;
+    const xpathResult: { clicked: boolean; matched: string } = await c.page.evaluate(
+      ({ s12, e12, s24, e24 }: { s12: string; e12: string; s24: string; e24: string }) => {
+        function findClickable(el: HTMLElement): HTMLElement {
+          let cur: HTMLElement | null = el;
+          while (cur) {
+            if (cur.classList.contains('cursor-pointer')) return cur;
+            cur = cur.parentElement;
+          }
+          cur = el;
+          while (cur) {
+            if (cur.tagName === 'DIV' && cur.classList.contains('w-full')) return cur;
+            cur = cur.parentElement;
+          }
+          return el;
         }
-        const target = (el ?? p) as HTMLElement;
-        target.click();
-        return true;
+
+        // Try 12h XPath first, then 24h
+        const xpaths = [
+          // 12h: both start and end present in <p>
+          `//p[contains(normalize-space(.), '${s12}') and contains(normalize-space(.), '${e12}')]`,
+          // 24h: both start and end present in <p>
+          `//p[contains(normalize-space(.), '${s24}') and contains(normalize-space(.), '${e24}')]`,
+        ];
+
+        for (const xp of xpaths) {
+          try {
+            const result = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+            const p = result.singleNodeValue as HTMLElement | null;
+            if (p) {
+              const text = (p.textContent ?? '').replace(/\s+/g, ' ').trim();
+              const target = findClickable(p);
+              target.click();
+              return { clicked: true, matched: text };
+            }
+          } catch {
+            // ignore invalid XPath and try next
+          }
+        }
+
+        return { clicked: false, matched: '' };
       },
-      { start: slotStart, end: slotEnd }
+      { s12: start12, e12: end12, s24: start24, e24: end24 }
     );
 
-    if (!xpathFound) {
+    if (!xpathResult.clicked) {
       throw new Error(
-        `Could not find an appointment card matching slot "${normalizedSlot}" (original: "${rawSlot}"). ` +
-        `Check that the slot value matches the time range displayed on the calendar.`
+        `Could not find an appointment card matching slot "${rawSlot}". ` +
+        `Tried 12h format "${full12}" and 24h format "${full24}". ` +
+        `Check that the slot value matches the time displayed in the appointment cards.`
       );
     }
 
-    ctx.log('XPath fallback found and clicked the appointment card.');
+    ctx.log(`XPath fallback clicked card — matched text: "${xpathResult.matched}"`);
   } else {
-    ctx.log(`Clicked appointment card for slot "${normalizedSlot}".`);
+    ctx.log(`Clicked appointment card — matched text: "${clickResult.matched}"`);
   }
 
-  // ── Step 5: Wait for detail panel text to change ─────────────────────────────────────────────
-  // Poll up to 5 seconds for the detail area text to differ from what it was before the click.
+  // ── Step 5: Poll for DOM text change (confirms detail panel updated) ──────────────────────────
 
-  ctx.log('Waiting for appointment details to update...');
+  ctx.log('Waiting for appointment details section to update...');
 
   const maxWaitMs = 5000;
   const pollIntervalMs = 300;
@@ -184,22 +286,12 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   while (Date.now() - startTime < maxWaitMs) {
     await c.wait(pollIntervalMs);
 
-    const afterDetailText: string = await c.page.evaluate(() => {
-      const candidates = [
-        document.querySelector('[class*="detail"]'),
-        document.querySelector('[class*="panel"]'),
-        document.querySelector('[class*="sidebar"]'),
-        document.querySelector('[class*="appointment-info"]'),
-      ].filter(Boolean);
-
-      if (candidates.length > 0 && candidates[0]) {
-        return (candidates[0] as HTMLElement).innerText ?? '';
-      }
-      return '';
+    const afterSnapshot: string = await c.page.evaluate(() => {
+      return document.body.innerText ?? '';
     });
 
-    if (afterDetailText !== beforeDetailText && afterDetailText.length > 0) {
-      ctx.log(`Detail panel text changed after ${Date.now() - startTime}ms — appointment details updated.`);
+    if (afterSnapshot !== beforeSnapshot) {
+      ctx.log(`DOM text changed after ${Date.now() - startTime}ms — appointment details updated.`);
       detailChanged = true;
       break;
     }
@@ -207,11 +299,14 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
 
   if (!detailChanged) {
     ctx.log(
-      `Warning: Detail panel text did not change within ${maxWaitMs}ms. ` +
-      `The click may have registered but the panel selector may not match your DOM. ` +
-      `Verify the detail panel selector or increase the wait time.`
+      `Warning: DOM text did not change within ${maxWaitMs}ms after clicking. ` +
+      `The click likely registered but the details panel may render identically ` +
+      `or the update is not text-based. Continuing.`
     );
   }
 
-  ctx.log(`Done — clicked appointment slot "${normalizedSlot}" and detail panel ${detailChanged ? 'updated' : 'unchanged'}.`);
+  ctx.log(
+    `Done — clicked appointment slot "${rawSlot}" ` +
+    `(detail panel ${detailChanged ? 'updated' : 'unchanged'}).`
+  );
 }
