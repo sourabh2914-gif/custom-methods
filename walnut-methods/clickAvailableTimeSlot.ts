@@ -67,6 +67,32 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       ` and contains(normalize-space(text()),':')` +   // time slots contain ":" e.g. "10:00 AM"
     `]`;
 
+  // Current system time in minutes-since-midnight (used to skip past slots)
+  const nowMinutes = (() => {
+    const now = new Date();
+    return now.getHours() * 60 + now.getMinutes();
+  })();
+  ctx.log(`Current system time: ${Math.floor(nowMinutes / 60)}:${String(nowMinutes % 60).padStart(2, '0')} (${nowMinutes} min since midnight)`);
+
+  /**
+   * Parse a slot's start time from its label (e.g. "09:30 AM – 10:00 AM") and
+   * return minutes-since-midnight, or null if unparseable.
+   */
+  function parseSlotStartMinutes(slotText: string): number | null {
+    // Match the FIRST time in the label, e.g. "09:30 AM" from "09:30 AM – 10:00 AM"
+    const match = slotText.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+    if (!match) return null;
+    let hours = parseInt(match[1], 10);
+    const minutes = parseInt(match[2], 10);
+    const period = match[3].toUpperCase();
+    if (period === 'AM') {
+      if (hours === 12) hours = 0;          // 12:xx AM → 0:xx
+    } else {
+      if (hours !== 12) hours += 12;        // 1:xx PM → 13:xx, but 12:xx PM stays 12
+    }
+    return hours * 60 + minutes;
+  }
+
   for (const section of sections) {
     ctx.log(`Checking section: ${section}`);
 
@@ -114,23 +140,51 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       ctx.log(`Section "${section}" is already active`);
     }
 
-    // Find the first available slot — works for both DOM variants
-    const slotResult: { text: string } | null = await c.page.evaluate((xp: string) => {
-      const result = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
-      const el = result.singleNodeValue as HTMLElement | null;
-      if (!el) return null;
-      const text = (el.textContent ?? '').trim();
-      return text ? { text } : null;
+    // Collect ALL available (unfaded) slots in this section
+    const allSlots: { text: string; index: number }[] = await c.page.evaluate((xp: string) => {
+      const result = document.evaluate(xp, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+      const slots: { text: string; index: number }[] = [];
+      for (let i = 0; i < result.snapshotLength; i++) {
+        const el = result.snapshotItem(i) as HTMLElement | null;
+        if (!el) continue;
+        const text = (el.textContent ?? '').trim();
+        if (text) slots.push({ text, index: i });
+      }
+      return slots;
     }, availableSlotXpath);
 
-    if (!slotResult) {
+    if (allSlots.length === 0) {
       ctx.log(`No available slots in "${section}" — moving to next section`);
       continue;
     }
 
-    // Click the first available slot
-    ctx.log(`Found available slot in "${section}": "${slotResult.text}" — clicking...`);
-    await c.page.locator(`xpath=${availableSlotXpath}`).first().click();
+    // Filter out slots whose start time has already passed (start time <= current system time)
+    const futureSlots = allSlots.filter(slot => {
+      const startMin = parseSlotStartMinutes(slot.text);
+      if (startMin === null) {
+        ctx.log(`Could not parse time from slot text "${slot.text}" — skipping`);
+        return false;
+      }
+      if (startMin <= nowMinutes) {
+        ctx.log(`Skipping past/current slot "${slot.text}" (start=${startMin} min, now=${nowMinutes} min)`);
+        return false;
+      }
+      return true;
+    });
+
+    if (futureSlots.length === 0) {
+      ctx.log(`All available slots in "${section}" are in the past — moving to next section`);
+      continue;
+    }
+
+    const slotResult = futureSlots[0];
+
+    // Click the slot by its snapshot index (avoids re-querying the DOM)
+    ctx.log(`Found future available slot in "${section}": "${slotResult.text}" — clicking...`);
+
+    // Use the XPath with positional index to click the exact slot
+    const slotXpathIndexed = `(${availableSlotXpath})[${slotResult.index + 1}]`;
+    await c.page.locator(`xpath=${slotXpathIndexed}`).first().click();
 
     ctx.log(`Clicked time slot: "${slotResult.text}"`);
 
@@ -142,5 +196,9 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
     return; // Done
   }
 
-  throw new Error('No available time slots found in Morning, Afternoon, or Evening — all slots are booked.');
+  throw new Error(
+    `No bookable time slots found in Morning, Afternoon, or Evening. ` +
+    `Either all slots are booked/disabled or all available slots are in the past ` +
+    `(current system time: ${Math.floor(nowMinutes / 60)}:${String(nowMinutes % 60).padStart(2, '0')}).`
+  );
 }
