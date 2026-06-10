@@ -9,11 +9,15 @@ import type { WalnutContext } from './walnut';
  * category: Forms
  */
 export async function selectDateFromDropdowns(ctx: WalnutContext) {
-  // ctx.args[0] = value of ${date} — date string in dd/MM/yyyy format, e.g. "25/12/2026"
+  // ctx.args[0] = value of ${date} — accepts a direct date string (e.g. "16/06/2026")
+  //               or a runtime variable name (e.g. "nextDayDate") — resolved via getVariable fallback
 
   const c = ctx as any; // cast to any — web-only methods (evaluate/click/wait) not on union type
 
-  const dateInput = String(c.args[0] ?? '').trim();
+  const rawArg = String(c.args[0] ?? '').trim();
+  // If rawArg looks like a date (contains '/'), use it directly.
+  // Otherwise treat it as a runtime variable name and resolve it.
+  const dateInput = rawArg.includes('/') ? rawArg : String(c.getVariable(rawArg) ?? '').trim();
 
   // ── Step 1: Parse dd/MM/yyyy ──────────────────────────────────────────────
   const parts = dateInput.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
