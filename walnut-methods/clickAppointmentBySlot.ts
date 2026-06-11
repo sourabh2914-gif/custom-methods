@@ -207,10 +207,10 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   // Primary normalized form (matches the DOM variant the slot was captured from)
   const normalizedSlot = normalizeRange(rawSlot);
 
-  // Split into start/end
-  const parts = rawSlot.split('–').map(s => s.trim());
+  // Split into start/end — handle both en-dash (–) and plain hyphen (-) separators
+  const parts = rawSlot.split(/\s*[\u2013\u2014-]\s*/).map(s => s.trim());
   const rawStart = parts[0] ?? '';
-  const rawEnd   = parts[1] ?? '';
+  const rawEnd   = parts[1] ?? ''
 
   // Build both 12h and 24h variants of start/end for cross-format tolerance
   const start12 = is12Hour ? stripLeadingZero(rawStart) : to12h(rawStart);
@@ -406,6 +406,21 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
             const cardRole = extractCardRole(card);
             card.click();
             return { clicked: true, matched: rowRange, cardRole };
+          }
+        }
+      }
+
+      // ── Final fallback: scan ALL spans on the page ─────────────────────────────────────────────
+      // Catches any card DOM where the time is in a <span> but not inside [data-apt-card]
+      const allSpans = Array.from(document.querySelectorAll('span')) as HTMLElement[];
+      for (const span of allSpans) {
+        const text = collapse(span.textContent ?? '');
+        if (isMatch(text)) {
+          const target = findClickable(span);
+          if (target !== span) { // only click if we found a real cursor-pointer ancestor
+            const cardRole = extractCardRole(target);
+            target.click();
+            return { clicked: true, matched: text, cardRole };
           }
         }
       }
