@@ -210,12 +210,14 @@ export async function verifyAppointmentInWeekView(ctx: WalnutContext) {
   ];
 
   let cardFound = false;
+  let matchedSelector = '';
   for (const sel of cardSelectors) {
     try {
       const count = await c.page.locator(sel).count();
       if (count > 0) {
         ctx.log(`[WeekView] Appointment card found with selector: "${sel}" (count: ${count})`);
         cardFound = true;
+        matchedSelector = sel;
         break;
       }
     } catch (_) {
@@ -252,5 +254,47 @@ export async function verifyAppointmentInWeekView(ctx: WalnutContext) {
     );
   }
 
-  ctx.log(`[WeekView] Appointment card verified successfully for slot "${slotText}" on "${bookedDateRaw}"`);
+  // ── Scroll to the appointment card and click it ───────────────────────────────────────────────
+  ctx.log(`[WeekView] Scrolling to appointment card and clicking...`);
+
+  if (matchedSelector) {
+    // Use the matched CSS selector — scroll into view then click
+    await c.page.locator(matchedSelector).first().scrollIntoViewIfNeeded();
+    await ctx.wait(400);
+    await c.page.locator(matchedSelector).first().click();
+    ctx.log(`[WeekView] Clicked appointment card via selector: "${matchedSelector}"`);
+  } else {
+    // DOM walk fallback — scroll then click
+    await c.page.evaluate((startLabel: string) => {
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+      let node: Element | null;
+      while ((node = walker.nextNode() as Element)) {
+        const tag = node.tagName.toLowerCase();
+        if (['html','body','head','header','nav','script','style'].includes(tag)) continue;
+        const text = (node as HTMLElement).innerText?.trim() ?? '';
+        if (text.includes(startLabel) && text.length < 200) {
+          (node as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'center' });
+          return;
+        }
+      }
+    }, slotStartLabel);
+    await ctx.wait(500);
+    await c.page.evaluate((startLabel: string) => {
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+      let node: Element | null;
+      while ((node = walker.nextNode() as Element)) {
+        const tag = node.tagName.toLowerCase();
+        if (['html','body','head','header','nav','script','style'].includes(tag)) continue;
+        const text = (node as HTMLElement).innerText?.trim() ?? '';
+        if (text.includes(startLabel) && text.length < 200) {
+          (node as HTMLElement).click();
+          return;
+        }
+      }
+    }, slotStartLabel);
+    ctx.log(`[WeekView] Scrolled and clicked appointment card via DOM walk`);
+  }
+
+  await ctx.wait(500);
+  ctx.log(`[WeekView] Appointment card verified and clicked for slot "${slotText}" on "${bookedDateRaw}"`);
 }

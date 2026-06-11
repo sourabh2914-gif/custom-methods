@@ -242,16 +242,21 @@ export async function navigateToBookedDateInMonthView(ctx: WalnutContext) {
   if (cellCount === 0) {
     // Fallback: click by exact text match with no class filter
     ctx.log(`[MonthView] No cell found with class filter — trying broader selector...`);
+    await c.page.locator(`text="${dayStr}"`).first().scrollIntoViewIfNeeded();
+    await ctx.wait(300);
     await c.page.locator(`text="${dayStr}"`).first().click();
   } else if (cellCount === 1) {
+    await c.page.locator(`xpath=${dayCellXpath}`).first().scrollIntoViewIfNeeded();
+    await ctx.wait(300);
     await c.page.locator(`xpath=${dayCellXpath}`).first().click();
   } else {
-    // Multiple matches (e.g. day "1" could match "10","11","12"... but XPath uses normalize-space
-    // so exact match should be fine). Take the first non-muted one.
-    ctx.log(`[MonthView] Multiple day cell matches (${cellCount}) — clicking first one`);
+    // Multiple matches — scroll to and click the first non-muted one
+    ctx.log(`[MonthView] Multiple day cell matches (${cellCount}) — scrolling to and clicking first one`);
+    await c.page.locator(`xpath=${dayCellXpath}`).first().scrollIntoViewIfNeeded();
+    await ctx.wait(300);
     await c.page.locator(`xpath=${dayCellXpath}`).first().click();
   }
 
   await ctx.wait(500);
-  ctx.log(`[MonthView] Clicked date ${bookedDay} in ${monthNames[bookedMonth]} ${bookedYear}`);
+  ctx.log(`[MonthView] Scrolled to and clicked date ${bookedDay} in ${monthNames[bookedMonth]} ${bookedYear}`);
 }
