@@ -38,13 +38,63 @@ export async function navigateWithConfig(ctx: WalnutContext) {
 
   // --- 1. Language / Accept-Language header ---
   if (config['lang']) {
-    await page.setExtraHTTPHeaders({ 'Accept-Language': config['lang'] });
-    // Override navigator.language so JS code on the page also sees the correct locale.
+    const lang = config['lang'];
+
+    // Set the HTTP Accept-Language header so the server also sees the locale.
+    await page.setExtraHTTPHeaders({ 'Accept-Language': lang });
+
+    // Determine hourCycle from the locale tag:
+    //   en-US / en-CA / most *-US tags  → h12 (12-hour AM/PM)
+    //   en-GB / de / fr / most EU tags  → h23 (24-hour)
+    //   explicit hourlcycle=h12/h23 key overrides all of the above
+    const explicitHourCycle = config['hourlcycle'] || config['hourcycle'] || null;
+    const isH12Locale = /^(en-US|en-CA|en-AU|en-NZ|ar|hi|ko|zh)/i.test(lang);
+    const hourCycle: string = explicitHourCycle || (isH12Locale ? 'h12' : 'h23');
+
     await browserContext.addInitScript(`
-      Object.defineProperty(navigator, 'language', { get: () => '${config['lang']}' });
-      Object.defineProperty(navigator, 'languages', { get: () => ['${config['lang']}'] });
+      (function () {
+        const _lang = ${JSON.stringify(lang)};
+        const _hourCycle = ${JSON.stringify(hourCycle)};
+
+        // 1. Override navigator.language / navigator.languages
+        try {
+          Object.defineProperty(navigator, 'language',  { get: () => _lang });
+          Object.defineProperty(navigator, 'languages', { get: () => [_lang] });
+        } catch (e) { /* already defined — ignore */ }
+
+        // 2. Patch Intl.DateTimeFormat to inject locale + hourCycle defaults.
+        //    This forces the app's date/time rendering to use the correct
+        //    hour cycle even when the OS is set to a different locale.
+        const OrigDTF = Intl.DateTimeFormat;
+        function PatchedDTF(locales, options) {
+          const resolvedLocale = locales || _lang;
+          const resolvedOptions = Object.assign({ hourCycle: _hourCycle }, options || {});
+          // If caller explicitly passed hour12, respect it; otherwise enforce hourCycle.
+          if (options && options.hour12 !== undefined) {
+            delete resolvedOptions.hourCycle;
+          }
+          return new OrigDTF(resolvedLocale, resolvedOptions);
+        }
+        PatchedDTF.prototype = OrigDTF.prototype;
+        PatchedDTF.supportedLocalesOf = OrigDTF.supportedLocalesOf.bind(OrigDTF);
+        try { Intl.DateTimeFormat = PatchedDTF; } catch(e) { /* strict env */ }
+
+        // 3. Patch Date.prototype.toLocaleString / toLocaleTimeString / toLocaleDateString
+        //    so plain JS date formatting also respects the locale + hour cycle.
+        ['toLocaleString', 'toLocaleTimeString', 'toLocaleDateString'].forEach(function(method) {
+          const orig = Date.prototype[method];
+          Date.prototype[method] = function(locales, options) {
+            const resolvedLocale = locales || _lang;
+            const resolvedOptions = Object.assign({ hourCycle: _hourCycle }, options || {});
+            if (options && options.hour12 !== undefined) {
+              delete resolvedOptions.hourCycle;
+            }
+            return orig.call(this, resolvedLocale, resolvedOptions);
+          };
+        });
+      })();
     `);
-    ctx.log(`[NavigateWithConfig] Language set to: ${config['lang']}`);
+    ctx.log(`[NavigateWithConfig] Language set to: ${lang} | hourCycle enforced: ${hourCycle}`);
   }
 
   // --- 2. Viewport / Resolution ---
