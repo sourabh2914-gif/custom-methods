@@ -13,7 +13,7 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
   // ctx.args[1] = "firstSlot"    (from $[firstSlot])    — first morning slot (faded or unfaded)
   // ctx.args[2] = "lastSlot"     (from $[lastSlot])     — last evening slot (fallback: last afternoon slot)
   //
-  // Supports two DOM variants:
+  // Supports three DOM variants:
   //
   // Variant A — slots inside a grid-cols-3 wrapper (old DOM):
   //   <div class="grid grid-cols-3 gap-2 pt-3">
@@ -26,7 +26,7 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
   //   </div>
   //   Section tabs: <button class="... font-bold ..."><span>Morning</span></button>
   //
-  // Variant B — slots in individual relative divs, no grid-cols-3 wrapper (new DOM):
+  // Variant B — slots in individual relative divs, no grid-cols-3 wrapper:
   //   <div class="relative">
   //     <button class="w-full py-2 px-1 ... bg-gray-100 text-gray-600 ... cursor-pointer">
   //       09:30 AM – 10:00 AM
@@ -34,8 +34,21 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
   //   </div>
   //   Section tabs: <button class="flex-1 flex items-center ..."><img ...>"Evening"</button>
   //
-  // Available (clickable) slot = button NOT disabled + has cursor-pointer class (both variants)
+  // Variant C — grid-cols-2 wrapper, 24-hour time format, bg-white for available slots:
+  //   <div class="bg-[#F5F5F5] grid grid-cols-2 gap-2 p-3" style="position: relative; z-index: 1;">
+  //     <button class="relative py-1.5 px-1 text-[11px] font-medium rounded-full ... bg-white text-[#555] hover:bg-gray-50">
+  //       12:00 – 12:30
+  //     </button>
+  //   </div>
+  //   Section tabs: <button class="flex-1 flex items-center justify-center gap-1.5 py-2.5 ...">
+  //     <span class="relative z-10">Afternoon</span>
+  //     <span class="relative z-10 text-[9px] bg-[#3279AD] text-white rounded-full px-1.5">10</span>
+  //   </button>
+  //
+  // Available (clickable) slot = button NOT disabled, NOT cursor-not-allowed
+  //                              has cursor-pointer (A/B) OR bg-white/hover:bg-gray-50 (C)
   // Faded/disabled slot        = button has @disabled attribute (captured for firstSlot/lastSlot)
+  // Time format: 12-hour "09:30 AM – 10:00 AM" (A/B) or 24-hour "12:00 – 12:30" (C)
   //
   // Logic:
   //   1. Try Morning  → click tab if not active → find first non-disabled future slot → click it
@@ -56,9 +69,10 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
 
   const sections = ['Morning', 'Afternoon', 'Evening'];
 
-  // Tab XPath — supports both DOM variants:
+  // Tab XPath — supports all DOM variants:
   //   Variant A: <button><span>Morning</span></button>
   //   Variant B: <button><img alt="Morning" ...>"Morning"</button>  (text node, no span)
+  //   Variant C: <button ...><span class="relative z-10">Afternoon</span><span ...>10</span></button>
   const findTabXpath = (label: string) =>
     `//button[` +
       `.//span[normalize-space(text())='${label}']` +
@@ -66,18 +80,24 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
     `]`;
 
   // XPath for clickable (non-disabled) slots only — used for the click action
+  // Variant C slots: bg-white (available), no disabled attr, no cursor-not-allowed
+  //   <button class="relative py-1.5 px-1 ... bg-white text-[#555] hover:bg-gray-50">12:00 – 12:30</button>
   const availableSlotXpath =
     `//button[` +
       `not(@disabled)` +
-      ` and contains(@class,'cursor-pointer')` +
-      ` and contains(normalize-space(text()),':')` +   // time slots contain ":" e.g. "10:00 AM"
+      ` and not(contains(@class,'cursor-not-allowed'))` +
+      ` and (contains(@class,'cursor-pointer') or contains(@class,'bg-white') or contains(@class,'hover:bg-gray-50'))` +
+      ` and contains(normalize-space(text()),':')` +   // time slots contain ":" e.g. "10:00 AM" or "12:00"
+      ` and not(contains(@class,'flex-1'))` +          // exclude section tab buttons
     `]`;
 
   // XPath for ALL slots (faded/disabled included) — used for firstSlot/lastSlot capture
   const allSlotsXpath =
     `//button[` +
-      `contains(normalize-space(text()),':')` +        // time slots contain ":" e.g. "10:00 AM"
-      ` and (contains(@class,'cursor-pointer') or contains(@class,'cursor-not-allowed') or @disabled)` +
+      `contains(normalize-space(text()),':')` +        // time slots contain ":" e.g. "10:00 AM" or "12:00"
+      ` and not(contains(@class,'flex-1'))` +          // exclude section tab buttons
+      ` and (contains(@class,'cursor-pointer') or contains(@class,'cursor-not-allowed') or @disabled` +
+      ` or contains(@class,'bg-white') or contains(@class,'bg-gray-50') or contains(@class,'rounded-full'))` +
     `]`;
 
   // Current system time in minutes-since-midnight (used to skip past slots)
@@ -88,22 +108,35 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
   ctx.log(`Current system time: ${Math.floor(nowMinutes / 60)}:${String(nowMinutes % 60).padStart(2, '0')} (${nowMinutes} min since midnight)`);
 
   /**
-   * Parse a slot's start time from its label (e.g. "09:30 AM – 10:00 AM") and
-   * return minutes-since-midnight, or null if unparseable.
+   * Parse a slot's start time from its label and return minutes-since-midnight, or null if unparseable.
+   * Supports:
+   *   - 12-hour format: "09:30 AM – 10:00 AM"  (Variant A / B)
+   *   - 24-hour format: "12:00 – 12:30"         (Variant C)
    */
   function parseSlotStartMinutes(slotText: string): number | null {
-    // Match the FIRST time in the label, e.g. "09:30 AM" from "09:30 AM – 10:00 AM"
-    const match = slotText.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-    if (!match) return null;
-    let hours = parseInt(match[1], 10);
-    const minutes = parseInt(match[2], 10);
-    const period = match[3].toUpperCase();
-    if (period === 'AM') {
-      if (hours === 12) hours = 0;          // 12:xx AM → 0:xx
-    } else {
-      if (hours !== 12) hours += 12;        // 1:xx PM → 13:xx, but 12:xx PM stays 12
+    // Try 12-hour format first: "09:30 AM" from "09:30 AM – 10:00 AM"
+    const match12 = slotText.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+    if (match12) {
+      let hours = parseInt(match12[1], 10);
+      const minutes = parseInt(match12[2], 10);
+      const period = match12[3].toUpperCase();
+      if (period === 'AM') {
+        if (hours === 12) hours = 0;          // 12:xx AM → 0:xx
+      } else {
+        if (hours !== 12) hours += 12;        // 1:xx PM → 13:xx, but 12:xx PM stays 12
+      }
+      return hours * 60 + minutes;
     }
-    return hours * 60 + minutes;
+    // Try 24-hour format: "12:00" from "12:00 – 12:30" (Variant C)
+    const match24 = slotText.match(/^(\d{1,2}):(\d{2})/);
+    if (match24) {
+      const hours = parseInt(match24[1], 10);
+      const minutes = parseInt(match24[2], 10);
+      if (hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59) {
+        return hours * 60 + minutes;
+      }
+    }
+    return null;
   }
 
   /**
@@ -124,7 +157,11 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
           classes.includes('font-bold') ||
           classes.includes('border-b') ||
           (classes.includes('text-gray-900') && !classes.includes('text-gray-400')) ||
-          (!classes.includes('text-gray-400') && classes.includes('flex-1'));
+          // Variant B/C: flex-1 tab is active only if NOT muted (text-gray-400 or text-[#aaa])
+          (classes.includes('flex-1') &&
+            !classes.includes('text-gray-400') &&
+            !classes.includes('text-[#aaa]') &&
+            !classes.includes('[#aaa]'));
         return { exists: true, isDisabled, isActive };
       }, tabXpath);
 
@@ -169,7 +206,11 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
           classes.includes('font-bold') ||
           classes.includes('border-b') ||
           (classes.includes('text-gray-900') && !classes.includes('text-gray-400')) ||
-          (!classes.includes('text-gray-400') && classes.includes('flex-1'));
+          // Variant B/C: flex-1 tab is active only if NOT muted (text-gray-400 or text-[#aaa])
+          (classes.includes('flex-1') &&
+            !classes.includes('text-gray-400') &&
+            !classes.includes('text-[#aaa]') &&
+            !classes.includes('[#aaa]'));
         return { exists: true, isDisabled, isActive };
       }, tabXpath);
 
@@ -259,15 +300,19 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
         const isDisabled = el.hasAttribute('disabled');
         const classes = el.className || '';
 
-        // Active tab signals across both variants:
+        // Active tab signals across all variants:
         //   Variant A: font-bold (active) vs font-normal (inactive)
         //   Variant B: border-b, text-gray-900, or absence of text-gray-400 (muted = inactive)
+        //   Variant C: flex-1 tabs — active = no muted color (text-[#aaa]), inactive = text-[#aaa]
         const isActive =
           classes.includes('font-bold') ||
           classes.includes('border-b') ||
           (classes.includes('text-gray-900') && !classes.includes('text-gray-400')) ||
-          // Variant B fallback: not muted and not a section-tab-level button with text-gray-400
-          (!classes.includes('text-gray-400') && classes.includes('flex-1'));
+          // Variant B/C: flex-1 tab is active only if NOT muted (text-gray-400 or text-[#aaa])
+          (classes.includes('flex-1') &&
+            !classes.includes('text-gray-400') &&
+            !classes.includes('text-[#aaa]') &&
+            !classes.includes('[#aaa]'));
 
         return { exists: true, isDisabled, isActive };
       }, tabXpath);
