@@ -203,11 +203,22 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
 
       /** Check if a collapsed paragraph text matches any of our candidate ranges */
       function isMatch(text: string): boolean {
-        // Exact full match (either format)
+        // ── Exact full-range match (primary) ─────────────────────────────────────────────────────
+        // e.g. text === "2:00 PM – 2:30 PM"  or  text === "14:00 – 14:30"
         if (text === f12 || text === f24) return true;
-        // Both parts present in text (handles minor whitespace differences)
-        if (s12 && e12 && text.includes(s12) && text.includes(e12)) return true;
-        if (s24 && e24 && text.includes(s24) && text.includes(e24)) return true;
+
+        // ── Normalised separator variants ─────────────────────────────────────────────────────────
+        // Some browsers render the en-dash differently; normalise and retry
+        const norm = text.replace(/\s*[-–—]\s*/g, ' – ');
+        if (norm === f12 || norm === f24) return true;
+
+        // ── Zero-pad / strip comparison ───────────────────────────────────────────────────────────
+        // Strip leading zeros from the card text and compare with our normalised candidates.
+        // e.g. "02:00 PM – 02:30 PM" → "2:00 PM – 2:30 PM" === f12  ✓
+        // This avoids partial substring hits like "2:00 PM" matching inside "01:30 PM – 02:00 PM".
+        const stripped = norm.replace(/\b0(\d)(:\d{2})/g, '$1$2');
+        if (stripped === f12 || stripped === f24) return true;
+
         return false;
       }
 
@@ -273,7 +284,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
     ctx.log('querySelector scan found no match — trying XPath fallback...');
 
     const xpathResult: { clicked: boolean; matched: string; cardRole: string } = await c.page.evaluate(
-      ({ s12, e12, s24, e24 }: { s12: string; e12: string; s24: string; e24: string }) => {
+      ({ s12, e12, s24, e24, f12, f24 }: { s12: string; e12: string; s24: string; e24: string; f12: string; f24: string }) => {
         function findClickable(el: HTMLElement): HTMLElement {
           let cur: HTMLElement | null = el;
           while (cur) {
@@ -299,10 +310,29 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           return '';
         }
 
-        // Try 12h XPath first, then 24h
+        // Match the FULL range string to avoid false positives.
+        // e.g. "01:30 PM – 02:00 PM" must NOT match when target is "02:00 PM – 02:30 PM".
+        // Strategy: find all <p> tags, strip leading zeros from their text, compare to full12/full24.
+        function collapseAndStrip(t: string): string {
+          return t.replace(/\s+/g, ' ').trim()
+                  .replace(/\s*[-\u2013\u2014]\s*/g, ' \u2013 ')
+                  .replace(/\b0(\d)(:\d{2})/g, '$1$2');
+        }
+        const allPs = Array.from(document.querySelectorAll('p')) as HTMLElement[];
+        for (const p of allPs) {
+          const norm = collapseAndStrip(p.textContent ?? '');
+          if (norm === f12 || norm === f24) {
+            const text = (p.textContent ?? '').replace(/\s+/g, ' ').trim();
+            const target = findClickable(p);
+            const cardRole = extractCardRole(target);
+            target.click();
+            return { clicked: true, matched: text, cardRole };
+          }
+        }
+        // XPath fallback for exact full-range match (contains full string)
         const xpaths = [
-          `//p[contains(normalize-space(.), '${s12}') and contains(normalize-space(.), '${e12}')]`,
-          `//p[contains(normalize-space(.), '${s24}') and contains(normalize-space(.), '${e24}')]`,
+          `//p[contains(normalize-space(.), '${f12}')]`,
+          `//p[contains(normalize-space(.), '${f24}')]`,
         ];
 
         for (const xp of xpaths) {
@@ -323,7 +353,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
 
         return { clicked: false, matched: '', cardRole: '' };
       },
-      { s12: start12, e12: end12, s24: start24, e24: end24 }
+      { s12: start12, e12: end12, s24: start24, e24: end24, f12: full12, f24: full24 }
     );
 
     if (!xpathResult.clicked) {
