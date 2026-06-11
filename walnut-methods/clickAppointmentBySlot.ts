@@ -11,7 +11,36 @@ import type { WalnutContext } from './walnut';
 export async function clickAppointmentBySlot(ctx: WalnutContext) {
   // ctx.args[0] = "selectedslot" (from $[selectedslot]) — runtime variable holding slot time range
   //
-  // Supports FOUR DOM variants:
+  // Supports FIVE DOM variants:
+  //
+  // ── Variant E — Absolute-positioned appointment card (data-apt-card, 12-hour, hyphen separator) ──
+  //   Card container: <div data-apt-card="1" class="absolute left-1 right-1 cursor-pointer rounded-lg
+  //                        overflow-hidden transition-shadow hover:shadow-md"
+  //                        style="top: 2800px; height: 80px; background-color: rgb(236,253,245);
+  //                               border: 1px solid rgb(167,243,208); z-index: 5;">
+  //     <div class="flex flex-col h-full px-2 py-1 gap-0.5 overflow-hidden">
+  //       <div class="flex items-center gap-1.5 min-w-0">
+  //         <div class="h-6 w-6 rounded-full ...">DP</div>
+  //         <span class="text-[13px] font-semibold ...">DemoTest patient</span>
+  //       </div>
+  //       <div class="rounded-md px-1.5 py-0.5 self-start" style="background-color: rgb(255,255,255);">
+  //         <span class="text-[10px] font-medium leading-tight truncate" style="color: rgb(5,150,105);">
+  //           "5:30 PM"
+  //           " - "
+  //           "6:00 PM"
+  //         </span>
+  //       </div>
+  //       <div class="flex items-center gap-1 mt-auto pl-0.5">
+  //         <span class="w-1.5 h-1.5 rounded-full flex-shrink-0" ...></span>
+  //         <span class="text-[12px] font-medium ... capitalize">md new patient hematology</span>
+  //       </div>
+  //     </div>
+  //   </div>
+  //   Time is in a <span class="text-[10px] font-medium leading-tight truncate"> with " - " separator
+  //   (hyphen, not en-dash). The data-apt-card attribute identifies this card type.
+  //   isMatch() already normalises "-" → " – " so matching works without special-casing.
+  //   findClickable() walks up to the cursor-pointer div (the data-apt-card element itself).
+  //
   //
   // ── Variant D — Week-view calendar grid (12-hour, AM/PM, time in span labels) ─────────────────
   //   Row structure:
@@ -106,6 +135,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   //   - Variant A/B/C: scan all <p> elements, match full time range text, walk up to cursor-pointer div
   //   - Variant D: find row whose two time <span> labels match start+end of target slot,
   //                then click the cursor-pointer card div in that same row
+  //   - Variant E: scan data-apt-card elements, check all <span> texts for time match
   //   - Cross-format: both 12h and 24h candidates always tried (full12 + full24)
   //   - All matching uses equality (never partial includes) to avoid adjacent-slot false positives
   //
@@ -294,6 +324,29 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         }
       }
 
+      // ── Variant E: data-apt-card absolute-positioned cards with time in <span> ─────────────────
+      // Card: <div data-apt-card="..." class="... cursor-pointer ...">
+      //   <div class="rounded-md px-1.5 py-0.5 self-start">
+      //     <span class="text-[10px] font-medium leading-tight truncate">
+      //       "5:30 PM" " - " "6:00 PM"   ← hyphen separator, not en-dash
+      //     </span>
+      //   </div>
+      // </div>
+      // isMatch() normalises the hyphen to " – " so no special-casing needed.
+      const aptCards = Array.from(document.querySelectorAll('[data-apt-card]')) as HTMLElement[];
+      for (const card of aptCards) {
+        const spans = Array.from(card.querySelectorAll('span')) as HTMLElement[];
+        for (const span of spans) {
+          const text = collapse(span.textContent ?? '');
+          if (isMatch(text)) {
+            const target = findClickable(card);
+            const cardRole = extractCardRole(target);
+            target.click();
+            return { clicked: true, matched: text, cardRole };
+          }
+        }
+      }
+
       // ── Variant D: week-view row with two time <span> labels ──────────────────────────────────
       // Row: <div class="flex" style="...height: 175px;">
       //   Left col: <div class="flex-shrink-0 flex flex-col justify-between ...">
@@ -413,6 +466,21 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
             const cardRole = extractCardRole(target);
             target.click();
             return { clicked: true, matched: text, cardRole };
+          }
+        }
+
+        // Variant E fallback: data-apt-card absolute-positioned cards with time in <span>
+        const aptCards2 = Array.from(document.querySelectorAll('[data-apt-card]')) as HTMLElement[];
+        for (const card of aptCards2) {
+          const spans2 = Array.from(card.querySelectorAll('span')) as HTMLElement[];
+          for (const span of spans2) {
+            const norm2 = collapseAndStrip(span.textContent ?? '');
+            if (norm2 === f12 || norm2 === f24) {
+              const target = findClickable(card);
+              const cardRole = extractCardRole(target);
+              target.click();
+              return { clicked: true, matched: norm2, cardRole };
+            }
           }
         }
 
