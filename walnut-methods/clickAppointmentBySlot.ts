@@ -11,9 +11,9 @@ import type { WalnutContext } from './walnut';
 export async function clickAppointmentBySlot(ctx: WalnutContext) {
   // ctx.args[0] = "selectedslot" (from $[selectedslot]) — runtime variable holding slot time range
   //
-  // Supports TWO DOM variants:
+  // Supports THREE DOM variants:
   //
-  // ── Old DOM (12-hour format, AM/PM) ───────────────────────────────────────────────────────────
+  // ── Variant A — Old DOM (12-hour format, AM/PM) ───────────────────────────────────────────────
   //   Card container: <div class="cursor-pointer w-full h-full">
   //     <div class="w-full h-full flex items-start gap-2 p-2">
   //       <div class="h-7 w-7 ...">TV</div>
@@ -29,7 +29,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   //   </div>
   //   Slot variable format: "03:30 PM – 04:00 PM"  (leading zero stripped → "3:30 PM – 4:00 PM")
   //
-  // ── New DOM (24-hour format, no AM/PM) ────────────────────────────────────────────────────────
+  // ── Variant B — New DOM (24-hour format, no AM/PM) ────────────────────────────────────────────
   //   Time label column: <span class="-rotate-90 text-[11px] text-text-gray ...">16:00</span>
   //   Card container: <div class="cursor-pointer w-full h-full">
   //     <div class="rounded-2xl border shadow-sm p-1.5 flex items-center gap-2 w-full h-full overflow-hidden ...">
@@ -49,10 +49,42 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   //   </div>
   //   Slot variable format: "16:00 – 16:30"  (24-hour, no AM/PM)
   //
+  // ── Variant C — New DOM with doctor photo card (12-hour format, AM/PM) ───────────────────────
+  //   Card container: <div class="cursor-pointer w-full h-full">
+  //     <div class="rounded-2xl border shadow-sm p-1.5 flex items-center gap-2 w-full h-full overflow-hidden"
+  //          style="background-color: rgb(238,242,255); border-color: rgb(199,210,254);">
+  //       <div class="relative flex-shrink-0">
+  //         <img src="..." alt="Dr. Doctor Appointment" class="w-9 h-9 rounded-full object-cover">
+  //         <div class="absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full flex items-center
+  //                     justify-center border-2 border-white" style="background-color: rgb(34,197,94);">
+  //           <svg ...></svg>
+  //         </div>
+  //       </div>
+  //       <div class="min-w-0 flex-1">
+  //         <p class="text-xs font-semibold text-text-color truncate">Dr. Doctor Appointment</p>
+  //         <div class="flex items-center gap-1 flex-wrap">
+  //           <span class="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
+  //                 style="background-color: rgb(238,242,255); color: rgb(67,56,202); border: 1px solid rgb(199,210,254);">
+  //             Doctor
+  //           </span>
+  //         </div>
+  //         <p class="text-[10px] text-text-gray">
+  //           "9:30 AM"
+  //           " – "
+  //           "10:00 AM"
+  //         </p>
+  //       </div>
+  //     </div>
+  //   </div>
+  //   Slot variable format: "09:30 AM – 10:00 AM"  (leading zero stripped → "9:30 AM – 10:00 AM")
+  //   Same <p class="text-[10px] text-text-gray"> as Variant B but 12-hour time with AM/PM.
+  //
   // Detection strategy:
-  //   - If slot contains AM/PM → Old DOM → normalize leading zeros → match <p class="text-[10px] leading-tight ...">
-  //   - If slot is 24-hour only → New DOM → match <p class="text-[10px] text-text-gray">
-  //   - Both variants: walk up from matched <p> to find <div class="cursor-pointer ..."> and click
+  //   - All variants: walk all <p> elements, match time text, walk up to cursor-pointer div and click
+  //   - Variant A: time in <p class="text-[10px] leading-tight">
+  //   - Variant B: time in <p class="text-[10px] text-text-gray"> with 24h format
+  //   - Variant C: time in <p class="text-[10px] text-text-gray"> with 12h AM/PM format
+  //   - Cross-format: both 12h and 24h candidates always tried (full12 + full24)
   //
   // Steps:
   //   1. Read slot value from runtime variable
@@ -154,7 +186,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   //
   // Strategy B: XPath fallback — same logic expressed in XPath if Strategy A finds nothing.
 
-  const clickResult: { clicked: boolean; matched: string } = await c.page.evaluate(
+  const clickResult: { clicked: boolean; matched: string; cardRole: string } = await c.page.evaluate(
     ({ f12, f24, s12, e12, s24, e24 }: {
       f12: string; f24: string;
       s12: string; e12: string;
@@ -195,29 +227,52 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         return el;
       }
 
-      // ── Variant A & B: scan all <p> tags ──────────────────────────────────────────────────────
-      // Old DOM: <p class="text-[10px] leading-tight" ...>
-      // New DOM: <p class="text-[10px] text-text-gray">
+      /**
+       * Extract the role/title badge text from the card container.
+       * Variant A: no role badge — returns ''
+       * Variant B/C: <span class="text-[9px] font-bold px-1.5 py-0.5 rounded-full ...">Nurse Navigator</span>
+       *              inside <div class="flex items-center gap-1 flex-wrap">
+       */
+      function extractCardRole(container: HTMLElement): string {
+        // Look for a role badge span: text-[9px] font-bold rounded-full inside flex-wrap div
+        const roleSpans = Array.from(container.querySelectorAll(
+          'div.flex.flex-wrap span, div[class*="flex-wrap"] span'
+        )) as HTMLElement[];
+        for (const span of roleSpans) {
+          const t = (span.textContent ?? '').trim();
+          if (t.length > 0 && t.length < 40) return t; // role labels are short
+        }
+        return '';
+      }
+
+      // ── All Variants: scan all <p> tags for time match ────────────────────────────────────────
+      // Variant A: <p class="text-[10px] leading-tight" ...>
+      // Variant B: <p class="text-[10px] text-text-gray"> with 24h format
+      // Variant C: <p class="text-[10px] text-text-gray"> with 12h AM/PM format
       const paragraphs = Array.from(document.querySelectorAll('p'));
       for (const p of paragraphs) {
         const text = collapse(p.textContent ?? '');
         if (isMatch(text)) {
           const target = findClickable(p as HTMLElement);
+          const cardRole = extractCardRole(target);
           target.click();
-          return { clicked: true, matched: text };
+          return { clicked: true, matched: text, cardRole };
         }
       }
 
-      return { clicked: false, matched: '' };
+      return { clicked: false, matched: '', cardRole: '' };
     },
     { f12: full12, f24: full24, s12: start12, e12: end12, s24: start24, e24: end24 }
   );
+
+  // Role extracted from the clicked card — used to verify detail panel update
+  let cardRole = clickResult.cardRole;
 
   if (!clickResult.clicked) {
     // ── XPath fallback ─────────────────────────────────────────────────────────────────────────
     ctx.log('querySelector scan found no match — trying XPath fallback...');
 
-    const xpathResult: { clicked: boolean; matched: string } = await c.page.evaluate(
+    const xpathResult: { clicked: boolean; matched: string; cardRole: string } = await c.page.evaluate(
       ({ s12, e12, s24, e24 }: { s12: string; e12: string; s24: string; e24: string }) => {
         function findClickable(el: HTMLElement): HTMLElement {
           let cur: HTMLElement | null = el;
@@ -233,11 +288,20 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           return el;
         }
 
+        function extractCardRole(container: HTMLElement): string {
+          const roleSpans = Array.from(container.querySelectorAll(
+            'div.flex.flex-wrap span, div[class*="flex-wrap"] span'
+          )) as HTMLElement[];
+          for (const span of roleSpans) {
+            const t = (span.textContent ?? '').trim();
+            if (t.length > 0 && t.length < 40) return t;
+          }
+          return '';
+        }
+
         // Try 12h XPath first, then 24h
         const xpaths = [
-          // 12h: both start and end present in <p>
           `//p[contains(normalize-space(.), '${s12}') and contains(normalize-space(.), '${e12}')]`,
-          // 24h: both start and end present in <p>
           `//p[contains(normalize-space(.), '${s24}') and contains(normalize-space(.), '${e24}')]`,
         ];
 
@@ -248,15 +312,16 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
             if (p) {
               const text = (p.textContent ?? '').replace(/\s+/g, ' ').trim();
               const target = findClickable(p);
+              const cardRole = extractCardRole(target);
               target.click();
-              return { clicked: true, matched: text };
+              return { clicked: true, matched: text, cardRole };
             }
           } catch {
             // ignore invalid XPath and try next
           }
         }
 
-        return { clicked: false, matched: '' };
+        return { clicked: false, matched: '', cardRole: '' };
       },
       { s12: start12, e12: end12, s24: start24, e24: end24 }
     );
@@ -269,19 +334,33 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
       );
     }
 
-    ctx.log(`XPath fallback clicked card — matched text: "${xpathResult.matched}"`);
+    cardRole = xpathResult.cardRole;
+    ctx.log(`XPath fallback clicked card — matched text: "${xpathResult.matched}", role: "${cardRole}"`);
   } else {
-    ctx.log(`Clicked appointment card — matched text: "${clickResult.matched}"`);
+    ctx.log(`Clicked appointment card — matched text: "${clickResult.matched}", role: "${cardRole}"`);
   }
 
-  // ── Step 5: Poll for DOM text change (confirms detail panel updated) ──────────────────────────
+  // ── Step 5: Poll for detail panel to show slot time AND role (confirms update) ─────────────────
+  //
+  // We check that the detail panel's text contains:
+  //   1. The slot time (either 12h or 24h form of start/end)
+  //   2. The role/title from the clicked card (e.g. "Nurse Navigator", "Doctor") — if available
+  //
+  // This handles both DOM variants:
+  //   - Variant A (old DOM): no role badge → only slot time checked
+  //   - Variant B/C (new DOM): role badge present → both slot time AND role checked
 
   ctx.log('Waiting for appointment details section to update...');
+  if (cardRole) {
+    ctx.log(`Expecting detail panel to show slot time and role: "${cardRole}"`);
+  }
 
   const maxWaitMs = 5000;
   const pollIntervalMs = 300;
   const startTime = Date.now();
   let detailChanged = false;
+  let slotVisible = false;
+  let roleVisible = false;
 
   while (Date.now() - startTime < maxWaitMs) {
     await c.wait(pollIntervalMs);
@@ -290,23 +369,50 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
       return document.body.innerText ?? '';
     });
 
-    if (afterSnapshot !== beforeSnapshot) {
-      ctx.log(`DOM text changed after ${Date.now() - startTime}ms — appointment details updated.`);
+    if (afterSnapshot === beforeSnapshot) continue;
+
+    // DOM has changed — now check for specific content
+    const bodyText = afterSnapshot;
+
+    // Check slot time visible (any of the 4 time candidates)
+    slotVisible =
+      bodyText.includes(start12) || bodyText.includes(end12) ||
+      bodyText.includes(start24) || bodyText.includes(end24);
+
+    // Check role visible — only required if the card had a role badge
+    roleVisible = !cardRole || bodyText.includes(cardRole);
+
+    if (slotVisible && roleVisible) {
+      ctx.log(
+        `Detail panel updated after ${Date.now() - startTime}ms — ` +
+        `slot time visible: ${slotVisible}, role visible: ${roleVisible}.`
+      );
       detailChanged = true;
       break;
     }
+
+    // DOM changed but expected content not yet there — keep polling
+    ctx.log(`DOM changed but waiting for slot/role text... (slot: ${slotVisible}, role: ${roleVisible})`);
   }
 
   if (!detailChanged) {
-    ctx.log(
-      `Warning: DOM text did not change within ${maxWaitMs}ms after clicking. ` +
-      `The click likely registered but the details panel may render identically ` +
-      `or the update is not text-based. Continuing.`
-    );
+    // Last-resort: accept any DOM change (detail panel may show data differently)
+    const finalSnapshot: string = await c.page.evaluate(() => document.body.innerText ?? '');
+    if (finalSnapshot !== beforeSnapshot) {
+      ctx.log(
+        `Warning: DOM changed but could not confirm slot time or role in detail panel within ${maxWaitMs}ms. ` +
+        `Continuing — the click registered.`
+      );
+    } else {
+      ctx.log(
+        `Warning: DOM text did not change within ${maxWaitMs}ms after clicking. ` +
+        `The click likely registered but the details panel may render identically. Continuing.`
+      );
+    }
   }
 
   ctx.log(
     `Done — clicked appointment slot "${rawSlot}" ` +
-    `(detail panel ${detailChanged ? 'updated' : 'unchanged'}).`
+    `(slot visible: ${slotVisible}, role visible: ${roleVisible || !cardRole}).`
   );
 }
