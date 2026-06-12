@@ -250,6 +250,100 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
     document.querySelectorAll(`[${marker}]`).forEach((el: Element) => el.removeAttribute(marker));
   }, MARKER);
 
+  // ── Pre-scroll: bring the target time slot into the visible area before searching ─────────────
+  // The modal calendar uses a fixed-height scrollable container. If the target slot is below
+  // the current viewport (e.g. 12:30 PM when only 9–10 AM is visible), the card may not be
+  // rendered yet. We scroll by time-position so the card is in the DOM before querying it.
+  await c.page.evaluate(({ start24, start12 }: { start24: string; start12: string }) => {
+    // Find the scrollable modal body — look for the deepest overflow-y:auto/scroll container
+    // that is large enough to be the calendar panel (height > 200px).
+    function findScrollable(): HTMLElement | null {
+      // Prefer a dialog/modal content element if present
+      const candidates = Array.from(document.querySelectorAll('*')) as HTMLElement[];
+      let best: HTMLElement | null = null;
+      let bestHeight = 0;
+      for (const el of candidates) {
+        const style = window.getComputedStyle(el);
+        const overflow = style.overflowY;
+        if (overflow !== 'auto' && overflow !== 'scroll') continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.height < 200) continue; // skip tiny scrollable areas
+        if (rect.height > bestHeight) {
+          bestHeight = rect.height;
+          best = el;
+        }
+      }
+      return best;
+    }
+
+    // Parse "H:MM" or "HH:MM" to total minutes since midnight
+    function toMinutes(timeStr: string): number {
+      const parts = timeStr.trim().split(':');
+      if (parts.length < 2) return 0;
+      return parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10);
+    }
+
+    // Strategy A: find a time-label span in the DOM to use as scroll anchor.
+    // The calendar renders hour rows with labels like "9 AM", "10 AM", etc.
+    // Find the label closest to (but not past) our target time and scroll to it.
+    const targetMins = toMinutes(start24) || (() => {
+      // Parse 12h format: "12:30 PM" → 750 minutes
+      const m = start12.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+      if (!m) return 0;
+      let h = parseInt(m[1], 10);
+      if (m[3].toUpperCase() === 'PM' && h !== 12) h += 12;
+      if (m[3].toUpperCase() === 'AM' && h === 12) h = 0;
+      return h * 60 + parseInt(m[2], 10);
+    })();
+
+    // Try to find a rendered time-label element to scroll into view
+    const allElements = Array.from(document.querySelectorAll('span, div')) as HTMLElement[];
+    let bestEl: HTMLElement | null = null;
+    let bestDiff = Infinity;
+
+    for (const el of allElements) {
+      const text = (el.textContent ?? '').trim();
+      // Match time labels: "9 AM", "9:30 AM", "09:00", etc.
+      const m12 = text.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i);
+      const m24 = text.match(/^(\d{1,2}):(\d{2})$/);
+      let elMins = -1;
+      if (m12) {
+        let h = parseInt(m12[1], 10);
+        const min = parseInt(m12[2] ?? '0', 10);
+        if (m12[3].toUpperCase() === 'PM' && h !== 12) h += 12;
+        if (m12[3].toUpperCase() === 'AM' && h === 12) h = 0;
+        elMins = h * 60 + min;
+      } else if (m24) {
+        elMins = parseInt(m24[1], 10) * 60 + parseInt(m24[2], 10);
+      }
+      if (elMins < 0) continue;
+      const diff = Math.abs(elMins - targetMins);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestEl = el;
+      }
+    }
+
+    if (bestEl) {
+      bestEl.scrollIntoView({ behavior: 'instant', block: 'center' });
+      return;
+    }
+
+    // Fallback: scroll the modal container by estimated pixel offset
+    // Assumption: calendar starts at 00:00, each hour = ~80px (common for day-view calendars)
+    const scrollable = findScrollable();
+    if (scrollable) {
+      const pxPerHour = 80;
+      const calendarStartHour = 0;
+      const targetHour = targetMins / 60;
+      const targetPx = (targetHour - calendarStartHour) * pxPerHour;
+      scrollable.scrollTop = Math.max(0, targetPx - 100); // offset 100px above target
+    }
+  }, { start24, start12 });
+
+  // Wait for scroll to settle and any lazy-rendered cards to appear in the DOM
+  await c.wait(600);
+
   const clickResult: { clicked: boolean; matched: string; cardRole: string } = await c.page.evaluate(
     ({ f12, f24, s12, e12, s24, e24, marker }: {
       f12: string; f24: string;
