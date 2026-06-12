@@ -237,9 +237,14 @@ export async function verifyAppointmentInWeekView(ctx: WalnutContext) {
 
   await ctx.wait(400);
 
-  // Helper: scan DOM for the appointment card and click it if found
+  // Helper: find the appointment card via DOM walk, mark it with a temp attribute,
+  // then click it using Playwright's locator (fires proper pointer events for React).
   async function tryClickCard(): Promise<boolean> {
-    return c.page.evaluate(({ start, end }: { start: string; end: string }) => {
+    // Step A: mark the card element in the DOM
+    const marked: boolean = await c.page.evaluate(({ start, end }: { start: string; end: string }) => {
+      // Clear any previous mark
+      document.querySelectorAll('[data-walnut-card]').forEach(el => el.removeAttribute('data-walnut-card'));
+
       const candidates: HTMLElement[] = [];
       const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
       let node: Element | null;
@@ -250,20 +255,32 @@ export async function verifyAppointmentInWeekView(ctx: WalnutContext) {
         const raw = el.innerText?.trim() ?? '';
         if (!raw) continue;
         if (!raw.includes(start)) continue;
-        // Require end time too — prevents matching a previous card whose END time = our START time
         if (end && !raw.includes(end)) continue;
-        // Must be a real card, not a bare time label or "+" cell
         if (raw.length <= start.length + 5) continue;
         candidates.push(el);
       }
       if (candidates.length === 0) return false;
+
       // Pick smallest element with card-like content (> 20 chars)
       candidates.sort((a, b) => (a.innerText?.length ?? 0) - (b.innerText?.length ?? 0));
       const card = candidates.find(el => (el.innerText?.trim().length ?? 0) > 20) ?? candidates[0];
+      card.setAttribute('data-walnut-card', 'true');
       card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      card.click();
       return true;
     }, { start: slotStart, end: slotEnd ?? '' });
+
+    if (!marked) return false;
+
+    // Step B: use Playwright's click (fires full pointer/mouse events React needs)
+    await ctx.wait(300);
+    await c.page.locator('[data-walnut-card="true"]').first().click();
+
+    // Clean up the temp attribute
+    await c.page.evaluate(() => {
+      document.querySelectorAll('[data-walnut-card]').forEach(el => el.removeAttribute('data-walnut-card'));
+    });
+
+    return true;
   }
 
   let clicked = await tryClickCard();
