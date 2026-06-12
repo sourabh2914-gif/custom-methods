@@ -11,7 +11,7 @@ import type { WalnutContext } from './walnut';
 export async function clickAppointmentBySlot(ctx: WalnutContext) {
   // ctx.args[0] = "selectedslot" (from $[selectedslot]) — runtime variable holding slot time range
   //
-  // Supports FIVE DOM variants:
+  // Supports SIX DOM variants (E has two sub-variants E1/E2):
   //
   // ── Variant E — Absolute-positioned appointment card (data-apt-card, 12-hour, hyphen separator) ──
   //   Card container: <div data-apt-card="1" class="absolute left-1 right-1 cursor-pointer rounded-lg
@@ -207,10 +207,10 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   // Primary normalized form (matches the DOM variant the slot was captured from)
   const normalizedSlot = normalizeRange(rawSlot);
 
-  // Split into start/end
-  const parts = rawSlot.split('–').map(s => s.trim());
+  // Split into start/end — handle both en-dash (–) and plain hyphen (-) separators
+  const parts = rawSlot.split(/\s*[\u2013\u2014-]\s*/).map(s => s.trim());
   const rawStart = parts[0] ?? '';
-  const rawEnd   = parts[1] ?? '';
+  const rawEnd   = parts[1] ?? ''
 
   // Build both 12h and 24h variants of start/end for cross-format tolerance
   const start12 = is12Hour ? stripLeadingZero(rawStart) : to12h(rawStart);
@@ -234,16 +234,196 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
 
   // ── Step 4: Find and click the matching appointment card ──────────────────────────────────────
   //
-  // Strategy A: querySelector scan — walk all <p> elements, match time text, then walk up
-  //             to <div class="cursor-pointer ..."> and click it.
-  //
-  // Strategy B: XPath fallback — same logic expressed in XPath if Strategy A finds nothing.
+  // The modal calendar is scrollable — slots below the visible area must be scrolled into view
+  // before clicking. Strategy:
+  //   1. evaluate() finds the matching element and scrolls it into view (scrollIntoView),
+  //      marks it with a unique data attribute, and returns metadata (matched text, role).
+  //      It does NOT call .click() — clicking an off-screen element inside overflow:scroll fails.
+  //   2. After evaluate(), wait briefly for scroll animation, then use Playwright's native
+  //      locator click (which handles viewport scrolling and pointer events correctly).
+  //   3. Remove the temporary marker attribute after clicking.
+
+  const MARKER = 'data-walnut-apt-target';
+
+  // Clean up any leftover marker from a previous run
+  await c.page.evaluate((marker: string) => {
+    document.querySelectorAll(`[${marker}]`).forEach((el: Element) => el.removeAttribute(marker));
+  }, MARKER);
+
+  // ── Pre-scroll: bring the target time slot into the visible area before searching ─────────────
+  // The modal calendar uses a fixed-height scrollable container. If the target slot is below
+  // the current viewport (e.g. 12:30 PM when only 9–10 AM is visible), the card may not be
+  // rendered yet. We scroll by time-position so the card is in the DOM before querying it.
+  await c.page.evaluate(({ start24, start12 }: { start24: string; start12: string }) => {
+
+    // ── Convert time string to minutes since midnight ────────────────────────────────────────────
+    // Handles both "12:30" (24h) and "12:30 PM" (12h)
+    function toMinutes(t: string): number {
+      const t24 = t.trim().match(/^(\d{1,2}):(\d{2})$/);
+      if (t24) return parseInt(t24[1], 10) * 60 + parseInt(t24[2], 10);
+      const t12 = t.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+      if (t12) {
+        let h = parseInt(t12[1], 10);
+        const min = parseInt(t12[2], 10);
+        const p = t12[3].toUpperCase();
+        if (p === 'PM' && h !== 12) h += 12;
+        if (p === 'AM' && h === 12) h = 0;
+        return h * 60 + min;
+      }
+      return -1;
+    }
+
+    const targetMins = toMinutes(start24) >= 0 ? toMinutes(start24) : toMinutes(start12);
+    if (targetMins < 0) return; // can't parse — skip pre-scroll
+
+    // ── Find the modal's scrollable calendar container ────────────────────────────────────────────
+    // We want the INNERMOST scrollable container that:
+    //   1. Has overflow-y auto/scroll
+    //   2. Has scrollable content (scrollHeight > clientHeight)
+    //   3. Has visible height >= 150px (rules out tiny dropdowns)
+    //   4. Is NOT the document body/html (those scroll the whole page, not the modal)
+    function findCalendarScrollable(): HTMLElement | null {
+      const candidates = Array.from(document.querySelectorAll('*')) as HTMLElement[];
+      let best: HTMLElement | null = null;
+      let bestScrollable = 0;
+
+      for (const el of candidates) {
+        if (el === document.body || el.tagName === 'HTML') continue;
+        const style = window.getComputedStyle(el);
+        const ov = style.overflowY;
+        if (ov !== 'auto' && ov !== 'scroll') continue;
+        const scrollable = el.scrollHeight - el.clientHeight;
+        if (scrollable < 50) continue; // not meaningfully scrollable
+        const rect = el.getBoundingClientRect();
+        if (rect.height < 150) continue; // too small
+        if (scrollable > bestScrollable) {
+          bestScrollable = scrollable;
+          best = el;
+        }
+      }
+      return best;
+    }
+
+    // ── Strategy A: find a rendered time-label SPAN (leaf, exact match) and scroll to it ─────────
+    // The calendar renders hour/half-hour labels in spans like "9 AM", "9:30 AM", "12 PM" etc.
+    // We use ONLY spans (not divs) with exact time-label text to avoid false matches on
+    // composite divs whose textContent aggregates multiple labels.
+    const labelSpans = Array.from(document.querySelectorAll('span')) as HTMLElement[];
+    let bestLabelEl: HTMLElement | null = null;
+    let bestDiff = Infinity;
+
+    for (const span of labelSpans) {
+      // Must be a leaf or near-leaf (textContent === own text)
+      const text = (span.textContent ?? '').trim();
+      if (!text || text.length > 12) continue; // time labels are short
+      const mins = toMinutes(text);
+      if (mins < 0) continue;
+      const diff = Math.abs(mins - targetMins);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestLabelEl = span;
+      }
+    }
+
+    if (bestLabelEl && bestDiff <= 60) {
+      // Found a time label within 60 min of target — scroll it to the top of the viewport
+      // so the card for that slot (which starts AT the label and extends downward) is visible.
+      // Use 'start' not 'center' — 'center' puts the label mid-screen but the card body is below.
+      bestLabelEl.scrollIntoView({ behavior: 'instant', block: 'start' });
+      return;
+    }
+
+    // ── Strategy B: scroll the calendar container by computed pixel offset ───────────────────────
+    // Measure the pixel-per-minute ratio from two visible time labels, then scroll proportionally.
+    const scrollContainer = findCalendarScrollable();
+    if (!scrollContainer) return;
+
+    // Try to detect px-per-hour from the DOM by finding two time labels with known positions
+    const timeLabels: { mins: number; top: number }[] = [];
+    for (const span of labelSpans) {
+      const text = (span.textContent ?? '').trim();
+      if (!text || text.length > 12) continue;
+      const mins = toMinutes(text);
+      if (mins < 0) continue;
+      const rect = span.getBoundingClientRect();
+      const containerRect = scrollContainer.getBoundingClientRect();
+      const relTop = rect.top - containerRect.top + scrollContainer.scrollTop;
+      timeLabels.push({ mins, top: relTop });
+    }
+
+    if (timeLabels.length >= 2) {
+      // Sort by position and compute px-per-minute from the first two distinct labels
+      timeLabels.sort((a, b) => a.top - b.top);
+      let pxPerMin = 2; // default: ~120px/hour
+      for (let i = 1; i < timeLabels.length; i++) {
+        const dMin = timeLabels[i].mins - timeLabels[i - 1].mins;
+        const dPx  = timeLabels[i].top  - timeLabels[i - 1].top;
+        if (dMin > 0 && dPx > 0) {
+          pxPerMin = dPx / dMin;
+          break;
+        }
+      }
+      const firstLabel = timeLabels[0];
+      const targetPx = firstLabel.top + (targetMins - firstLabel.mins) * pxPerMin;
+      scrollContainer.scrollTop = Math.max(0, targetPx - scrollContainer.clientHeight / 2);
+      return;
+    }
+
+    // ── Strategy C: last-resort — use proportional scroll based on assumed calendar bounds ────────
+    // Assume calendar shows 0:00–24:00 (or 8:00–20:00) and scroll proportionally.
+    const calStartMins = 0;
+    const calEndMins   = 24 * 60;
+    const ratio = (targetMins - calStartMins) / (calEndMins - calStartMins);
+    scrollContainer.scrollTop = ratio * scrollContainer.scrollHeight - scrollContainer.clientHeight / 2;
+
+  }, { start24, start12 });
+
+  // Wait for first scroll to settle
+  await c.wait(500);
+
+  // ── Second-pass scroll: find the actual card span and ensure it's in view ───────────────────
+  // The pre-scroll gets us to the right time region, but the card may still be just off-screen.
+  // Now that the DOM is populated, find the card's time span and scroll it into view directly.
+  await c.page.evaluate(({ f12, f24 }: { f12: string; f24: string }) => {
+    function collapse(t: string) { return t.replace(/\s+/g, ' ').trim(); }
+    function normR(range: string): string {
+      const parts = range.replace(/\s*[-\u2013\u2014]\s*/g, '|||').split('|||');
+      return parts.map(t => {
+        let s = t.replace(/\b0(\d)(:\d{2})/g, '$1$2');
+        s = s.replace(/\b(\d{1,2}):00(\s*(AM|PM))/gi, '$1$2');
+        s = s.replace(/\b(\d{1,2}):00$/, '$1');
+        return s.trim();
+      }).join(' \u2013 ');
+    }
+    function isM(text: string): boolean {
+      if (text.length > 30) return false;
+      const norm = text.replace(/\s*[-\u2013\u2014]\s*/g, ' \u2013 ');
+      if (norm === f12 || norm === f24) return true;
+      const stripped = norm.replace(/\b0(\d)(:\d{2})/g, '$1$2');
+      if (stripped === f12 || stripped === f24) return true;
+      if (normR(text) === normR(f12) || normR(text) === normR(f24)) return true;
+      return false;
+    }
+    // Find the first matching span/p and scroll it into view
+    const candidates = Array.from(document.querySelectorAll('span, p')) as HTMLElement[];
+    for (const el of candidates) {
+      const text = collapse(el.textContent ?? '');
+      if (isM(text)) {
+        el.scrollIntoView({ behavior: 'instant', block: 'center' });
+        return;
+      }
+    }
+  }, { f12: full12, f24: full24 });
+
+  // Wait for second scroll to settle and card to be fully in view
+  await c.wait(300);
 
   const clickResult: { clicked: boolean; matched: string; cardRole: string } = await c.page.evaluate(
-    ({ f12, f24, s12, e12, s24, e24 }: {
+    ({ f12, f24, s12, e12, s24, e24, marker }: {
       f12: string; f24: string;
       s12: string; e12: string;
       s24: string; e24: string;
+      marker: string;
     }) => {
       /**
        * Collapse all whitespace/newlines in a string and trim.
@@ -254,23 +434,52 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         return text.replace(/\s+/g, ' ').trim();
       }
 
+      /**
+       * Normalise a single time token for flexible matching:
+       *   "1:00 PM" → "1 PM"   (strip :00 minutes)
+       *   "01:30 PM" → "1:30 PM" (strip leading zero)
+       *   "13:00" → "13:00"    (24h kept as-is)
+       */
+      function normToken(t: string): string {
+        // Strip leading zero on hour
+        let s = t.replace(/\b0(\d)(:\d{2})/g, '$1$2');
+        // Strip :00 minutes when they're on the hour: "1:00 PM" → "1 PM", "13:00" → "13"
+        s = s.replace(/\b(\d{1,2}):00(\s*(AM|PM))/gi, '$1$2');
+        s = s.replace(/\b(\d{1,2}):00$/, '$1');
+        return s.trim();
+      }
+
+      /** Build all normalised forms of a full range string for comparison */
+      function normRange(range: string): string {
+        // Normalise separator to ' – '
+        const parts = range.replace(/\s*[-–—]\s*/g, '|||').split('|||');
+        return parts.map(normToken).join(' – ');
+      }
+
       /** Check if a collapsed paragraph text matches any of our candidate ranges */
       function isMatch(text: string): boolean {
+        // Reject overly long strings — a valid time range "H:MM AM – H:MM AM" is at most ~22 chars.
+        // Parent elements that aggregate multiple slots will be much longer; skip them entirely.
+        if (text.length > 30) return false;
+
         // ── Exact full-range match (primary) ─────────────────────────────────────────────────────
-        // e.g. text === "2:00 PM – 2:30 PM"  or  text === "14:00 – 14:30"
         if (text === f12 || text === f24) return true;
 
         // ── Normalised separator variants ─────────────────────────────────────────────────────────
-        // Some browsers render the en-dash differently; normalise and retry
         const norm = text.replace(/\s*[-–—]\s*/g, ' – ');
         if (norm === f12 || norm === f24) return true;
 
         // ── Zero-pad / strip comparison ───────────────────────────────────────────────────────────
-        // Strip leading zeros from the card text and compare with our normalised candidates.
-        // e.g. "02:00 PM – 02:30 PM" → "2:00 PM – 2:30 PM" === f12  ✓
-        // This avoids partial substring hits like "2:00 PM" matching inside "01:30 PM – 02:00 PM".
         const stripped = norm.replace(/\b0(\d)(:\d{2})/g, '$1$2');
         if (stripped === f12 || stripped === f24) return true;
+
+        // ── :00 minute omission — DOM may render "1:00 PM" as "1 PM" ────────────────────────────
+        // e.g. card shows "12:30 PM - 1 PM" but target is "12:30 PM – 1:00 PM"
+        // Normalise both the card text and our candidates by stripping :00 minutes.
+        const normText   = normRange(text);
+        const normF12    = normRange(f12);
+        const normF24    = normRange(f24);
+        if (normText === normF12 || normText === normF24) return true;
 
         return false;
       }
@@ -309,6 +518,17 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         return '';
       }
 
+      /**
+       * Mark the target element with a unique attribute, scroll it into view inside its
+       * scrollable container, and return. The actual click is done by Playwright after
+       * the scroll completes so that pointer events fire correctly.
+       */
+      function markAndScroll(target: HTMLElement, matched: string, cardRole: string): { clicked: boolean; matched: string; cardRole: string } {
+        target.setAttribute(marker, 'true');
+        target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+        return { clicked: true, matched, cardRole };
+      }
+
       // ── Variants A/B/C: scan all <p> tags for time match ─────────────────────────────────────
       // Variant A: <p class="text-[10px] leading-tight" ...>
       // Variant B: <p class="text-[10px] text-text-gray"> with 24h format
@@ -319,30 +539,67 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         if (isMatch(text)) {
           const target = findClickable(p as HTMLElement);
           const cardRole = extractCardRole(target);
-          target.click();
-          return { clicked: true, matched: text, cardRole };
+          return markAndScroll(target, text, cardRole);
         }
       }
 
       // ── Variant E: data-apt-card absolute-positioned cards with time in <span> ─────────────────
-      // Card: <div data-apt-card="..." class="... cursor-pointer ...">
-      //   <div class="rounded-md px-1.5 py-0.5 self-start">
-      //     <span class="text-[10px] font-medium leading-tight truncate">
-      //       "5:30 PM" " - " "6:00 PM"   ← hyphen separator, not en-dash
-      //     </span>
+      // Covers two sub-variants of this card type:
+      //
+      // E1 (modal / Appointment List):
+      //   <div data-apt-card="1" class="absolute left-1 right-1 cursor-pointer ...">
+      //     <div class="rounded-md px-1.5 py-0.5 self-start">
+      //       <span class="text-[10px] font-medium leading-tight truncate" style="color:rgb(5,150,105)">
+      //         "5:30 PM" " - " "6:00 PM"
+      //       </span>
+      //     </div>
       //   </div>
-      // </div>
-      // isMatch() normalises the hyphen to " – " so no special-casing needed.
+      //
+      // E2 (day/week calendar view — same card structure, different page context):
+      //   <div data-apt-card="1" class="absolute left-1 right-1 cursor-pointer rounded-lg ...">
+      //     <div class="flex flex-col h-full px-2 py-1 gap-0.5 overflow-hidden">
+      //       <div class="flex items-center gap-1.5 min-w-0">
+      //         <div class="h-6 w-6 rounded-full ...">DP</div>
+      //         <span class="text-[13px] font-semibold ...">DemoTest patient</span>
+      //       </div>
+      //       <div class="rounded-md px-1.5 py-0.5 self-start" style="background-color:rgb(255,255,255)">
+      //         <span class="text-[10px] font-medium leading-tight truncate" style="color:rgb(5,150,105)">
+      //           "1:00 PM"
+      //           " - "
+      //           "1:30 PM"
+      //         </span>
+      //       </div>
+      //       <div class="flex items-center gap-1 mt-auto pl-0.5">
+      //         <span class="w-1.5 h-1.5 rounded-full flex-shrink-0" ...></span>
+      //         <span>Md New Patient Hematol...</span>
+      //       </div>
+      //     </div>
+      //   </div>
+      //
+      // isMatch() normalises "-" → " – " and handles ":00" omission, so both sub-variants match.
       const aptCards = Array.from(document.querySelectorAll('[data-apt-card]')) as HTMLElement[];
       for (const card of aptCards) {
+        // First: try the specific time span selector used in both E1 and E2
+        // (class contains "font-medium" and "leading-tight" — the time badge span)
+        const timeSpanDirect = card.querySelector(
+          'span[class*="font-medium"][class*="leading-tight"], span[class*="text-[10px]"][class*="font-medium"]'
+        ) as HTMLElement | null;
+        if (timeSpanDirect) {
+          const text = collapse(timeSpanDirect.textContent ?? '');
+          if (isMatch(text)) {
+            const target = findClickable(card);
+            const cardRole = extractCardRole(target);
+            return markAndScroll(target, text, cardRole);
+          }
+        }
+        // Fallback: scan all spans in the card
         const spans = Array.from(card.querySelectorAll('span')) as HTMLElement[];
         for (const span of spans) {
           const text = collapse(span.textContent ?? '');
           if (isMatch(text)) {
             const target = findClickable(card);
             const cardRole = extractCardRole(target);
-            target.click();
-            return { clicked: true, matched: text, cardRole };
+            return markAndScroll(target, text, cardRole);
           }
         }
       }
@@ -400,20 +657,62 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         const rowRange = `${startLabel} – ${endLabel}`;
 
         if (isMatch(rowRange)) {
-          // Found the matching row — click the cursor-pointer card inside it
+          // Found the matching row — scroll and click the cursor-pointer card inside it
           const card = row.querySelector('[class*="cursor-pointer"]') as HTMLElement | null;
           if (card) {
             const cardRole = extractCardRole(card);
-            card.click();
-            return { clicked: true, matched: rowRange, cardRole };
+            return markAndScroll(card, rowRange, cardRole);
+          }
+        }
+      }
+
+      // ── Final fallback: scan ALL spans on the page ─────────────────────────────────────────────
+      // Catches any card DOM where the time is in a <span> but not inside [data-apt-card].
+      // IMPORTANT: only match spans whose OWN text (not inherited from children) equals the target.
+      // Using textContent on a parent span can pick up sibling card text — causing wrong-slot clicks.
+      const allSpans = Array.from(document.querySelectorAll('span')) as HTMLElement[];
+      for (const span of allSpans) {
+        // Use only the direct text nodes of the span (not descendants) to avoid false positives
+        // where a wrapper span accumulates text from multiple child cards.
+        const directText = Array.from(span.childNodes)
+          .filter(n => n.nodeType === Node.TEXT_NODE)
+          .map(n => n.textContent ?? '')
+          .join('');
+        const directCollapsed = collapse(directText);
+        // Also try full textContent but ONLY if this span has no element children
+        // (i.e. it's a leaf node), preventing ancestor spans from matching.
+        const isLeaf = span.querySelector('*') === null;
+        const text = isLeaf ? collapse(span.textContent ?? '') : directCollapsed;
+        if (text && isMatch(text)) {
+          const target = findClickable(span);
+          if (target !== span) { // only click if we found a real cursor-pointer ancestor
+            const cardRole = extractCardRole(target);
+            return markAndScroll(target, text, cardRole);
           }
         }
       }
 
       return { clicked: false, matched: '', cardRole: '' };
     },
-    { f12: full12, f24: full24, s12: start12, e12: end12, s24: start24, e24: end24 }
+    { f12: full12, f24: full24, s12: start12, e12: end12, s24: start24, e24: end24, marker: MARKER }
   );
+
+  // ── Playwright native click on the marked element ────────────────────────────────────────────
+  // evaluate() scrolled the element into view and marked it with MARKER.
+  // Now use Playwright's locator to actually click it — this fires proper pointer events
+  // and works correctly even inside overflow:scroll modal containers.
+  if (clickResult.clicked) {
+    // Wait for smooth scroll animation to settle (300ms is typical)
+    await c.wait(400);
+    try {
+      await c.page.locator(`[${MARKER}]`).first().click({ timeout: 5000 });
+    } finally {
+      // Remove the marker attribute regardless of click success/failure
+      await c.page.evaluate((marker: string) => {
+        document.querySelectorAll(`[${marker}]`).forEach((el: Element) => el.removeAttribute(marker));
+      }, MARKER);
+    }
+  }
 
   // Role extracted from the clicked card — used to verify detail panel update
   let cardRole = clickResult.cardRole;
@@ -423,7 +722,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
     ctx.log('querySelector scan found no match — trying XPath fallback...');
 
     const xpathResult: { clicked: boolean; matched: string; cardRole: string } = await c.page.evaluate(
-      ({ s12, e12, s24, e24, f12, f24 }: { s12: string; e12: string; s24: string; e24: string; f12: string; f24: string }) => {
+      ({ s12, e12, s24, e24, f12, f24, marker }: { s12: string; e12: string; s24: string; e24: string; f12: string; f24: string; marker: string }) => {
         function findClickable(el: HTMLElement): HTMLElement {
           let cur: HTMLElement | null = el;
           while (cur) {
@@ -449,9 +748,13 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           return '';
         }
 
+        function markAndScroll2(target: HTMLElement, matched: string, cardRole: string): { clicked: boolean; matched: string; cardRole: string } {
+          target.setAttribute(marker, 'true');
+          target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+          return { clicked: true, matched, cardRole };
+        }
+
         // Match the FULL range string to avoid false positives.
-        // e.g. "01:30 PM – 02:00 PM" must NOT match when target is "02:00 PM – 02:30 PM".
-        // Strategy: find all <p> tags, strip leading zeros from their text, compare to full12/full24.
         function collapseAndStrip(t: string): string {
           return t.replace(/\s+/g, ' ').trim()
                   .replace(/\s*[-\u2013\u2014]\s*/g, ' \u2013 ')
@@ -464,8 +767,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
             const text = (p.textContent ?? '').replace(/\s+/g, ' ').trim();
             const target = findClickable(p);
             const cardRole = extractCardRole(target);
-            target.click();
-            return { clicked: true, matched: text, cardRole };
+            return markAndScroll2(target, text, cardRole);
           }
         }
 
@@ -474,12 +776,13 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         for (const card of aptCards2) {
           const spans2 = Array.from(card.querySelectorAll('span')) as HTMLElement[];
           for (const span of spans2) {
+            // Only leaf spans — avoids parent spans accumulating text from multiple cards
+            if (span.querySelector('*') !== null) continue;
             const norm2 = collapseAndStrip(span.textContent ?? '');
             if (norm2 === f12 || norm2 === f24) {
               const target = findClickable(card);
               const cardRole = extractCardRole(target);
-              target.click();
-              return { clicked: true, matched: norm2, cardRole };
+              return markAndScroll2(target, norm2, cardRole);
             }
           }
         }
@@ -524,16 +827,15 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
             const card = row.querySelector('[class*="cursor-pointer"]') as HTMLElement | null;
             if (card) {
               const cardRole = extractCardRole(card);
-              card.click();
-              return { clicked: true, matched: rowRange, cardRole };
+              return markAndScroll2(card, rowRange, cardRole);
             }
           }
         }
 
-        // XPath fallback for exact full-range match (contains full string)
+        // XPath fallback — EXACT normalize-space match (not contains)
         const xpaths = [
-          `//p[contains(normalize-space(.), '${f12}')]`,
-          `//p[contains(normalize-space(.), '${f24}')]`,
+          `//p[normalize-space(.) = '${f12}']`,
+          `//p[normalize-space(.) = '${f24}']`,
         ];
 
         for (const xp of xpaths) {
@@ -544,17 +846,38 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
               const text = (p.textContent ?? '').replace(/\s+/g, ' ').trim();
               const target = findClickable(p);
               const cardRole = extractCardRole(target);
-              target.click();
-              return { clicked: true, matched: text, cardRole };
+              return markAndScroll2(target, text, cardRole);
             }
           } catch {
             // ignore invalid XPath and try next
           }
         }
 
+        // XPath span fallback — leaf spans only
+        const spanXpaths = [
+          `//span[not(*) and normalize-space(.) = '${f12}']`,
+          `//span[not(*) and normalize-space(.) = '${f24}']`,
+        ];
+        for (const xp of spanXpaths) {
+          try {
+            const result = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+            const span = result.singleNodeValue as HTMLElement | null;
+            if (span) {
+              const text = (span.textContent ?? '').replace(/\s+/g, ' ').trim();
+              const target = findClickable(span);
+              if (target !== span) {
+                const cardRole = extractCardRole(target);
+                return markAndScroll2(target, text, cardRole);
+              }
+            }
+          } catch {
+            // ignore
+          }
+        }
+
         return { clicked: false, matched: '', cardRole: '' };
       },
-      { s12: start12, e12: end12, s24: start24, e24: end24, f12: full12, f24: full24 }
+      { s12: start12, e12: end12, s24: start24, e24: end24, f12: full12, f24: full24, marker: MARKER }
     );
 
     if (!xpathResult.clicked) {
@@ -563,6 +886,16 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         `Tried 12h format "${full12}" and 24h format "${full24}". ` +
         `Check that the slot value matches the time displayed in the appointment cards.`
       );
+    }
+
+    // Playwright native click after scroll (same as primary path)
+    await c.wait(400);
+    try {
+      await c.page.locator(`[${MARKER}]`).first().click({ timeout: 5000 });
+    } finally {
+      await c.page.evaluate((marker: string) => {
+        document.querySelectorAll(`[${marker}]`).forEach((el: Element) => el.removeAttribute(marker));
+      }, MARKER);
     }
 
     cardRole = xpathResult.cardRole;
