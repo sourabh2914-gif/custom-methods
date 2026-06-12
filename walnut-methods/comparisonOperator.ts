@@ -33,57 +33,71 @@ export async function comparisonOperator(ctx: WalnutContext) {
   const actualStr = resolve(rawActual);
   const expectedStr = resolve(rawExpected);
 
-  c.log(`actualValue  : "${actualStr}"`);
+  // Normalize: trim leading/trailing whitespace and collapse internal whitespace.
+  // UI-captured text often contains extra spaces, newlines, or non-breaking spaces.
+  const normalize = (s: string): string =>
+    s.replace(/[\u00a0\u200b\t\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+  const actualNorm   = normalize(actualStr);
+  const expectedNorm = normalize(expectedStr);
+
+  c.log(`actualValue  : "${actualNorm}"`);
   c.log(`operator     : "${operator}"`);
-  c.log(`expectedValue: "${expectedStr}"`);
+  c.log(`expectedValue: "${expectedNorm}"`);
 
   // Attempt numeric comparison when both sides are numeric
-  const actualNum = parseFloat(actualStr);
-  const expectedNum = parseFloat(expectedStr);
+  const actualNum = parseFloat(actualNorm);
+  const expectedNum = parseFloat(expectedNorm);
   const bothNumeric = !isNaN(actualNum) && !isNaN(expectedNum);
 
   let result: boolean;
 
   switch (operator.trim().toLowerCase()) {
     case 'equals':
-      result = actualStr === expectedStr;
+      // Case-insensitive, whitespace-normalized equality
+      result = actualNorm.toLowerCase() === expectedNorm.toLowerCase();
       break;
 
     case 'not_equals':
-      result = actualStr !== expectedStr;
+      result = actualNorm.toLowerCase() !== expectedNorm.toLowerCase();
+      break;
+
+    case 'equals_exact':
+      // Strict exact match (case-sensitive, no normalization beyond trim)
+      result = actualNorm === expectedNorm;
       break;
 
     case 'greater_than':
-      if (!bothNumeric) throw new Error(`operator "greater_than" requires numeric values, got "${actualStr}" and "${expectedStr}"`);
+      if (!bothNumeric) throw new Error(`operator "greater_than" requires numeric values, got "${actualNorm}" and "${expectedNorm}"`);
       result = actualNum > expectedNum;
       break;
 
     case 'greater_than_or_equal_to':
-      if (!bothNumeric) throw new Error(`operator "greater_than_or_equal_to" requires numeric values, got "${actualStr}" and "${expectedStr}"`);
+      if (!bothNumeric) throw new Error(`operator "greater_than_or_equal_to" requires numeric values, got "${actualNorm}" and "${expectedNorm}"`);
       result = actualNum >= expectedNum;
       break;
 
     case 'lesser_than':
-      if (!bothNumeric) throw new Error(`operator "lesser_than" requires numeric values, got "${actualStr}" and "${expectedStr}"`);
+      if (!bothNumeric) throw new Error(`operator "lesser_than" requires numeric values, got "${actualNorm}" and "${expectedNorm}"`);
       result = actualNum < expectedNum;
       break;
 
     case 'lesser_than_or_equal_to':
-      if (!bothNumeric) throw new Error(`operator "lesser_than_or_equal_to" requires numeric values, got "${actualStr}" and "${expectedStr}"`);
+      if (!bothNumeric) throw new Error(`operator "lesser_than_or_equal_to" requires numeric values, got "${actualNorm}" and "${expectedNorm}"`);
       result = actualNum <= expectedNum;
       break;
 
     case 'contains':
-      result = actualStr.includes(expectedStr);
+      result = actualNorm.toLowerCase().includes(expectedNorm.toLowerCase());
       break;
 
     case 'does_not_contain':
-      result = !actualStr.includes(expectedStr);
+      result = !actualNorm.toLowerCase().includes(expectedNorm.toLowerCase());
       break;
 
     default:
       throw new Error(
-        `Unknown operator "${operator}". Valid operators: equals, not_equals, greater_than, greater_than_or_equal_to, lesser_than, lesser_than_or_equal_to, contains, does_not_contain`
+        `Unknown operator "${operator}". Valid operators: equals, not_equals, equals_exact, greater_than, greater_than_or_equal_to, lesser_than, lesser_than_or_equal_to, contains, does_not_contain`
       );
   }
 
@@ -91,9 +105,9 @@ export async function comparisonOperator(ctx: WalnutContext) {
 
   if (!result) {
     throw new Error(
-      `Comparison failed: "${actualStr}" ${operator} "${expectedStr}" evaluated to false`
+      `Comparison failed: "${actualNorm}" ${operator} "${expectedNorm}" evaluated to false`
     );
   }
 
-  c.log(`Comparison passed: "${actualStr}" ${operator} "${expectedStr}"`);
+  c.log(`Comparison passed: "${actualNorm}" ${operator} "${expectedNorm}"`);
 }
