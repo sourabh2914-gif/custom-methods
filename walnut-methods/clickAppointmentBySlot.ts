@@ -326,8 +326,10 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
     }
 
     if (bestLabelEl && bestDiff <= 60) {
-      // Found a time label within 60 min of target — scroll it into center
-      bestLabelEl.scrollIntoView({ behavior: 'instant', block: 'center' });
+      // Found a time label within 60 min of target — scroll it to the top of the viewport
+      // so the card for that slot (which starts AT the label and extends downward) is visible.
+      // Use 'start' not 'center' — 'center' puts the label mid-screen but the card body is below.
+      bestLabelEl.scrollIntoView({ behavior: 'instant', block: 'start' });
       return;
     }
 
@@ -376,8 +378,45 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
 
   }, { start24, start12 });
 
-  // Wait for scroll to settle and any lazy-rendered cards to appear in the DOM
-  await c.wait(700);
+  // Wait for first scroll to settle
+  await c.wait(500);
+
+  // ── Second-pass scroll: find the actual card span and ensure it's in view ───────────────────
+  // The pre-scroll gets us to the right time region, but the card may still be just off-screen.
+  // Now that the DOM is populated, find the card's time span and scroll it into view directly.
+  await c.page.evaluate(({ f12, f24 }: { f12: string; f24: string }) => {
+    function collapse(t: string) { return t.replace(/\s+/g, ' ').trim(); }
+    function normR(range: string): string {
+      const parts = range.replace(/\s*[-\u2013\u2014]\s*/g, '|||').split('|||');
+      return parts.map(t => {
+        let s = t.replace(/\b0(\d)(:\d{2})/g, '$1$2');
+        s = s.replace(/\b(\d{1,2}):00(\s*(AM|PM))/gi, '$1$2');
+        s = s.replace(/\b(\d{1,2}):00$/, '$1');
+        return s.trim();
+      }).join(' \u2013 ');
+    }
+    function isM(text: string): boolean {
+      if (text.length > 30) return false;
+      const norm = text.replace(/\s*[-\u2013\u2014]\s*/g, ' \u2013 ');
+      if (norm === f12 || norm === f24) return true;
+      const stripped = norm.replace(/\b0(\d)(:\d{2})/g, '$1$2');
+      if (stripped === f12 || stripped === f24) return true;
+      if (normR(text) === normR(f12) || normR(text) === normR(f24)) return true;
+      return false;
+    }
+    // Find the first matching span/p and scroll it into view
+    const candidates = Array.from(document.querySelectorAll('span, p')) as HTMLElement[];
+    for (const el of candidates) {
+      const text = collapse(el.textContent ?? '');
+      if (isM(text)) {
+        el.scrollIntoView({ behavior: 'instant', block: 'center' });
+        return;
+      }
+    }
+  }, { f12: full12, f24: full24 });
+
+  // Wait for second scroll to settle and card to be fully in view
+  await c.wait(300);
 
   const clickResult: { clicked: boolean; matched: string; cardRole: string } = await c.page.evaluate(
     ({ f12, f24, s12, e12, s24, e24, marker }: {
