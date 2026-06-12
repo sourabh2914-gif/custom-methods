@@ -162,6 +162,38 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   //   Slot variable format: "09:30 AM – 10:00 AM"  (leading zero stripped → "9:30 AM – 10:00 AM")
   //   Same <p class="text-[10px] text-text-gray"> as Variant B but 12-hour time with AM/PM.
   //
+  // ── Variant C2 — Doctor photo card, 12-hour with leading zeros, hyphen separator ───────────────
+  //   Outer wrapper: <div class="w-full h-full flex flex-col rounded-2xl overflow-hidden shadow-sm
+  //                              border border-gray-200 border-transparent shadow-none">
+  //   Card container: <div class="cursor-pointer w-full h-full">
+  //     <div class="rounded-2xl border shadow-sm p-1.5 flex items-center gap-2 w-full h-full overflow-hidden"
+  //          style="background-color: rgb(238,242,255); border-color: rgb(199,210,254);">
+  //       <div class="relative flex-shrink-0">
+  //         <img src="..." alt="Dr. carrot k" class="w-9 h-9 rounded-full object-cover">
+  //         <div class="absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full ... border-2 border-white"
+  //              style="background-color: rgb(34,197,94);"><svg ...></svg></div>
+  //       </div>
+  //       <div class="min-w-0 flex-1">
+  //         <p class="text-xs font-semibold text-text-color truncate">Dr. carrot k</p>
+  //         <div class="flex items-center gap-1 flex-wrap">
+  //           <span class="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
+  //                 style="background-color:rgb(238,242,255); color:rgb(67,56,202); border:1px solid rgb(199,210,254);">
+  //             Doctor
+  //           </span>
+  //         </div>
+  //         <p class="text-[10px] text-text-gray">
+  //           "05:17 PM"
+  //           " - "
+  //           "05:47 PM"
+  //         </p>
+  //       </div>
+  //     </div>
+  //   </div>
+  //   Slot variable format: "05:17 PM – 05:47 PM" → f12 = "5:17 PM – 5:47 PM" (leading zero stripped)
+  //   DOM uses plain hyphen " - " separator and leading-zero times e.g. "05:17 PM".
+  //   isMatch() handles: norm("-"→"–") then stripped(leading zero) → "5:17 PM – 5:47 PM" === f12 ✓
+  //   Handled by the same <p> scan as Variants B/C. No special-casing needed.
+  //
   // Detection strategy:
   //   - Variant A/B/C: scan all <p> elements, match full time range text, walk up to cursor-pointer div
   //   - Variant D: find row whose two time <span> labels match start+end of target slot,
