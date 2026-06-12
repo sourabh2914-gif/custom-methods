@@ -101,6 +101,37 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   //   </div>
   //   Slot variable format: "16:00 – 16:30"  (24-hour, no AM/PM)
   //
+  // ── Variant B2 — Same as B but with purple/avatar style and green status badge ─────────────────
+  //   Card container: <div class="cursor-pointer w-full h-full">
+  //     <div class="rounded-2xl border shadow-sm p-1.5 flex items-center gap-2 w-full h-full overflow-hidden"
+  //          style="background-color: rgb(253,244,255); border-color: rgb(233,213,255);">
+  //       <div class="relative flex-shrink-0">
+  //         <div class="w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold text-white"
+  //              style="background-color: rgb(192,132,252);">KK</div>
+  //         <div class="absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full flex items-center
+  //                     justify-center border-2 border-white" style="background-color: rgb(34,197,94);">
+  //           <svg ...></svg>
+  //         </div>
+  //       </div>
+  //       <div class="min-w-0 flex-1">
+  //         <p class="text-xs font-semibold text-text-color truncate">Krish krishna</p>
+  //         <div class="flex items-center gap-1 flex-wrap">
+  //           <span class="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
+  //                 style="background-color:rgb(253,244,255); color:rgb(126,34,206); border:1px solid rgb(233,213,255);">
+  //             Nurse Navigator
+  //           </span>
+  //         </div>
+  //         <p class="text-[10px] text-text-gray">
+  //           "16:30"
+  //           " – "
+  //           "17:00"
+  //         </p>
+  //       </div>
+  //     </div>
+  //   </div>
+  //   Time is in <p class="text-[10px] text-text-gray"> — identical to Variant B.
+  //   Handled by the same <p> scan. No special-casing needed.
+  //
   // ── Variant C — New DOM with doctor photo card (12-hour format, AM/PM) ───────────────────────
   //   Card container: <div class="cursor-pointer w-full h-full">
   //     <div class="rounded-2xl border shadow-sm p-1.5 flex items-center gap-2 w-full h-full overflow-hidden"
