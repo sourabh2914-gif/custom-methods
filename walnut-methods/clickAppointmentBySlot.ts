@@ -11,7 +11,59 @@ import type { WalnutContext } from './walnut';
 export async function clickAppointmentBySlot(ctx: WalnutContext) {
   // ctx.args[0] = "selectedslot" (from $[selectedslot]) — runtime variable holding slot time range
   //
-  // Supports THREE DOM variants:
+  // Supports FIVE DOM variants:
+  //
+  // ── Variant E — Absolute-positioned appointment card (data-apt-card, 12-hour, hyphen separator) ──
+  //   Card container: <div data-apt-card="1" class="absolute left-1 right-1 cursor-pointer rounded-lg
+  //                        overflow-hidden transition-shadow hover:shadow-md"
+  //                        style="top: 2800px; height: 80px; background-color: rgb(236,253,245);
+  //                               border: 1px solid rgb(167,243,208); z-index: 5;">
+  //     <div class="flex flex-col h-full px-2 py-1 gap-0.5 overflow-hidden">
+  //       <div class="flex items-center gap-1.5 min-w-0">
+  //         <div class="h-6 w-6 rounded-full ...">DP</div>
+  //         <span class="text-[13px] font-semibold ...">DemoTest patient</span>
+  //       </div>
+  //       <div class="rounded-md px-1.5 py-0.5 self-start" style="background-color: rgb(255,255,255);">
+  //         <span class="text-[10px] font-medium leading-tight truncate" style="color: rgb(5,150,105);">
+  //           "5:30 PM"
+  //           " - "
+  //           "6:00 PM"
+  //         </span>
+  //       </div>
+  //       <div class="flex items-center gap-1 mt-auto pl-0.5">
+  //         <span class="w-1.5 h-1.5 rounded-full flex-shrink-0" ...></span>
+  //         <span class="text-[12px] font-medium ... capitalize">md new patient hematology</span>
+  //       </div>
+  //     </div>
+  //   </div>
+  //   Time is in a <span class="text-[10px] font-medium leading-tight truncate"> with " - " separator
+  //   (hyphen, not en-dash). The data-apt-card attribute identifies this card type.
+  //   isMatch() already normalises "-" → " – " so matching works without special-casing.
+  //   findClickable() walks up to the cursor-pointer div (the data-apt-card element itself).
+  //
+  //
+  // ── Variant D — Week-view calendar grid (12-hour, AM/PM, time in span labels) ─────────────────
+  //   Row structure:
+  //   <div class="flex" style="border-bottom: ...; height: 175px;">
+  //     <div class="flex-shrink-0 flex flex-col justify-between py-2 p-3"
+  //          style="width: 90px; border-right: ...">
+  //       <span class="text-[11px] text-gray-400 font-medium whitespace-nowrap text-right">5 PM</span>
+  //       <span class="text-[11px] text-gray-400 font-medium whitespace-nowrap text-right">5:30 PM</span>
+  //     </div>
+  //     <div class="flex-shrink-0" style="width: 160px; height: 175px; border-right: ...">
+  //       <div class="rounded-xl flex flex-col justify-end overflow-hidden cursor-pointer select-none
+  //                   transition-all duration-300"
+  //            style="background-color: rgb(253,244,255); border-left: 4px solid rgb(233,213,255);
+  //                   height: 159px; outline: none;">
+  //         ... card content ...
+  //       </div>
+  //     </div>
+  //   </div>
+  //   Time is shown as TWO separate <span> labels in the left column of the row (start time + end time).
+  //   The card container has class "cursor-pointer" directly (no w-full h-full wrapper).
+  //   Slot variable format: "5:00 PM – 5:30 PM" (or "05:00 PM – 05:30 PM" with leading zero)
+  //   Match strategy: find the row whose two time spans form the target range, then click the
+  //                   cursor-pointer card div in that same row.
   //
   // ── Variant A — Old DOM (12-hour format, AM/PM) ───────────────────────────────────────────────
   //   Card container: <div class="cursor-pointer w-full h-full">
@@ -80,11 +132,12 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   //   Same <p class="text-[10px] text-text-gray"> as Variant B but 12-hour time with AM/PM.
   //
   // Detection strategy:
-  //   - All variants: walk all <p> elements, match time text, walk up to cursor-pointer div and click
-  //   - Variant A: time in <p class="text-[10px] leading-tight">
-  //   - Variant B: time in <p class="text-[10px] text-text-gray"> with 24h format
-  //   - Variant C: time in <p class="text-[10px] text-text-gray"> with 12h AM/PM format
+  //   - Variant A/B/C: scan all <p> elements, match full time range text, walk up to cursor-pointer div
+  //   - Variant D: find row whose two time <span> labels match start+end of target slot,
+  //                then click the cursor-pointer card div in that same row
+  //   - Variant E: scan data-apt-card elements, check all <span> texts for time match
   //   - Cross-format: both 12h and 24h candidates always tried (full12 + full24)
+  //   - All matching uses equality (never partial includes) to avoid adjacent-slot false positives
   //
   // Steps:
   //   1. Read slot value from runtime variable
@@ -256,7 +309,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         return '';
       }
 
-      // ── All Variants: scan all <p> tags for time match ────────────────────────────────────────
+      // ── Variants A/B/C: scan all <p> tags for time match ─────────────────────────────────────
       // Variant A: <p class="text-[10px] leading-tight" ...>
       // Variant B: <p class="text-[10px] text-text-gray"> with 24h format
       // Variant C: <p class="text-[10px] text-text-gray"> with 12h AM/PM format
@@ -268,6 +321,92 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           const cardRole = extractCardRole(target);
           target.click();
           return { clicked: true, matched: text, cardRole };
+        }
+      }
+
+      // ── Variant E: data-apt-card absolute-positioned cards with time in <span> ─────────────────
+      // Card: <div data-apt-card="..." class="... cursor-pointer ...">
+      //   <div class="rounded-md px-1.5 py-0.5 self-start">
+      //     <span class="text-[10px] font-medium leading-tight truncate">
+      //       "5:30 PM" " - " "6:00 PM"   ← hyphen separator, not en-dash
+      //     </span>
+      //   </div>
+      // </div>
+      // isMatch() normalises the hyphen to " – " so no special-casing needed.
+      const aptCards = Array.from(document.querySelectorAll('[data-apt-card]')) as HTMLElement[];
+      for (const card of aptCards) {
+        const spans = Array.from(card.querySelectorAll('span')) as HTMLElement[];
+        for (const span of spans) {
+          const text = collapse(span.textContent ?? '');
+          if (isMatch(text)) {
+            const target = findClickable(card);
+            const cardRole = extractCardRole(target);
+            target.click();
+            return { clicked: true, matched: text, cardRole };
+          }
+        }
+      }
+
+      // ── Variant D: week-view row with two time <span> labels ──────────────────────────────────
+      // Row: <div class="flex" style="...height: 175px;">
+      //   Left col: <div class="flex-shrink-0 flex flex-col justify-between ...">
+      //     <span>5 PM</span>   ← start label (may be "5 PM", "05:00", "5:00 PM" etc.)
+      //     <span>5:30 PM</span> ← end label
+      //   </div>
+      //   Card col: <div class="flex-shrink-0" style="width: 160px; ...">
+      //     <div class="... cursor-pointer ...">...</div>  ← clickable card
+      //   </div>
+      // </div>
+      //
+      // Strategy: find all flex rows that have a time-label column (flex-col justify-between),
+      // read both span texts, normalise to "H:MM AM/PM – H:MM AM/PM", compare to candidates,
+      // then find and click the cursor-pointer div in the same row.
+
+      /** Normalise a single time label to stripped 12h form for comparison.
+       *  "5 PM" → "5:00 PM", "05:30" → "5:30 AM/PM" (treated as 24h → 12h), "5:30 PM" → "5:30 PM" */
+      function normaliseLabel(label: string): string {
+        const t = label.trim();
+        // "5 PM" or "5:30 PM" style
+        const match12 = t.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i);
+        if (match12) {
+          const h = match12[1];
+          const m = match12[2] ?? '00';
+          const period = match12[3].toUpperCase();
+          return `${parseInt(h, 10)}:${m} ${period}`;
+        }
+        // "05:30" or "17:00" 24h style
+        const match24 = t.match(/^(\d{1,2}):(\d{2})$/);
+        if (match24) {
+          let h = parseInt(match24[1], 10);
+          const m = match24[2];
+          const period = h >= 12 ? 'PM' : 'AM';
+          if (h === 0) h = 12;
+          else if (h > 12) h -= 12;
+          return `${h}:${m} ${period}`;
+        }
+        return t;
+      }
+
+      // Scan flex row containers
+      const flexRows = Array.from(document.querySelectorAll('div.flex')) as HTMLElement[];
+      for (const row of flexRows) {
+        // Find the time-label column: flex-col + justify-between child
+        const labelCol = row.querySelector(':scope > div.flex-col.justify-between, :scope > div[class*="flex-col"][class*="justify-between"]') as HTMLElement | null;
+        if (!labelCol) continue;
+        const spans = Array.from(labelCol.querySelectorAll('span')) as HTMLElement[];
+        if (spans.length < 2) continue;
+        const startLabel = normaliseLabel(spans[0].textContent ?? '');
+        const endLabel   = normaliseLabel(spans[spans.length - 1].textContent ?? '');
+        const rowRange = `${startLabel} – ${endLabel}`;
+
+        if (isMatch(rowRange)) {
+          // Found the matching row — click the cursor-pointer card inside it
+          const card = row.querySelector('[class*="cursor-pointer"]') as HTMLElement | null;
+          if (card) {
+            const cardRole = extractCardRole(card);
+            card.click();
+            return { clicked: true, matched: rowRange, cardRole };
+          }
         }
       }
 
@@ -329,6 +468,68 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
             return { clicked: true, matched: text, cardRole };
           }
         }
+
+        // Variant E fallback: data-apt-card absolute-positioned cards with time in <span>
+        const aptCards2 = Array.from(document.querySelectorAll('[data-apt-card]')) as HTMLElement[];
+        for (const card of aptCards2) {
+          const spans2 = Array.from(card.querySelectorAll('span')) as HTMLElement[];
+          for (const span of spans2) {
+            const norm2 = collapseAndStrip(span.textContent ?? '');
+            if (norm2 === f12 || norm2 === f24) {
+              const target = findClickable(card);
+              const cardRole = extractCardRole(target);
+              target.click();
+              return { clicked: true, matched: norm2, cardRole };
+            }
+          }
+        }
+
+        // Variant D fallback: flex row with two time span labels
+        function normaliseLabel2(label: string): string {
+          const t = label.trim();
+          const match12 = t.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i);
+          if (match12) {
+            const h = match12[1];
+            const m = match12[2] ?? '00';
+            const period = match12[3].toUpperCase();
+            return `${parseInt(h, 10)}:${m} ${period}`;
+          }
+          const match24 = t.match(/^(\d{1,2}):(\d{2})$/);
+          if (match24) {
+            let h = parseInt(match24[1], 10);
+            const m = match24[2];
+            const period = h >= 12 ? 'PM' : 'AM';
+            if (h === 0) h = 12;
+            else if (h > 12) h -= 12;
+            return `${h}:${m} ${period}`;
+          }
+          return t;
+        }
+        function collapseAndStrip2(t: string): string {
+          return t.replace(/\s+/g, ' ').trim()
+                  .replace(/\s*[-\u2013\u2014]\s*/g, ' \u2013 ')
+                  .replace(/\b0(\d)(:\d{2})/g, '$1$2');
+        }
+        const flexRows2 = Array.from(document.querySelectorAll('div.flex')) as HTMLElement[];
+        for (const row of flexRows2) {
+          const labelCol = row.querySelector(':scope > div.flex-col.justify-between, :scope > div[class*="flex-col"][class*="justify-between"]') as HTMLElement | null;
+          if (!labelCol) continue;
+          const spans2 = Array.from(labelCol.querySelectorAll('span')) as HTMLElement[];
+          if (spans2.length < 2) continue;
+          const startLabel = normaliseLabel2(spans2[0].textContent ?? '');
+          const endLabel   = normaliseLabel2(spans2[spans2.length - 1].textContent ?? '');
+          const rowRange = `${startLabel} – ${endLabel}`;
+          const normRange = collapseAndStrip2(rowRange);
+          if (normRange === f12 || normRange === f24) {
+            const card = row.querySelector('[class*="cursor-pointer"]') as HTMLElement | null;
+            if (card) {
+              const cardRole = extractCardRole(card);
+              card.click();
+              return { clicked: true, matched: rowRange, cardRole };
+            }
+          }
+        }
+
         // XPath fallback for exact full-range match (contains full string)
         const xpaths = [
           `//p[contains(normalize-space(.), '${f12}')]`,
