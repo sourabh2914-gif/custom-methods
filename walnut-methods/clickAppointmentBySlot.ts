@@ -11,7 +11,7 @@ import type { WalnutContext } from './walnut';
 export async function clickAppointmentBySlot(ctx: WalnutContext) {
   // ctx.args[0] = "selectedslot" (from $[selectedslot]) — runtime variable holding slot time range
   //
-  // Supports FIVE DOM variants:
+  // Supports SIX DOM variants (E has two sub-variants E1/E2):
   //
   // ── Variant E — Absolute-positioned appointment card (data-apt-card, 12-hour, hyphen separator) ──
   //   Card container: <div data-apt-card="1" class="absolute left-1 right-1 cursor-pointer rounded-lg
@@ -544,16 +544,55 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
       }
 
       // ── Variant E: data-apt-card absolute-positioned cards with time in <span> ─────────────────
-      // Card: <div data-apt-card="..." class="... cursor-pointer ...">
-      //   <div class="rounded-md px-1.5 py-0.5 self-start">
-      //     <span class="text-[10px] font-medium leading-tight truncate">
-      //       "5:30 PM" " - " "6:00 PM"   ← hyphen separator, not en-dash
-      //     </span>
+      // Covers two sub-variants of this card type:
+      //
+      // E1 (modal / Appointment List):
+      //   <div data-apt-card="1" class="absolute left-1 right-1 cursor-pointer ...">
+      //     <div class="rounded-md px-1.5 py-0.5 self-start">
+      //       <span class="text-[10px] font-medium leading-tight truncate" style="color:rgb(5,150,105)">
+      //         "5:30 PM" " - " "6:00 PM"
+      //       </span>
+      //     </div>
       //   </div>
-      // </div>
-      // isMatch() normalises the hyphen to " – " so no special-casing needed.
+      //
+      // E2 (day/week calendar view — same card structure, different page context):
+      //   <div data-apt-card="1" class="absolute left-1 right-1 cursor-pointer rounded-lg ...">
+      //     <div class="flex flex-col h-full px-2 py-1 gap-0.5 overflow-hidden">
+      //       <div class="flex items-center gap-1.5 min-w-0">
+      //         <div class="h-6 w-6 rounded-full ...">DP</div>
+      //         <span class="text-[13px] font-semibold ...">DemoTest patient</span>
+      //       </div>
+      //       <div class="rounded-md px-1.5 py-0.5 self-start" style="background-color:rgb(255,255,255)">
+      //         <span class="text-[10px] font-medium leading-tight truncate" style="color:rgb(5,150,105)">
+      //           "1:00 PM"
+      //           " - "
+      //           "1:30 PM"
+      //         </span>
+      //       </div>
+      //       <div class="flex items-center gap-1 mt-auto pl-0.5">
+      //         <span class="w-1.5 h-1.5 rounded-full flex-shrink-0" ...></span>
+      //         <span>Md New Patient Hematol...</span>
+      //       </div>
+      //     </div>
+      //   </div>
+      //
+      // isMatch() normalises "-" → " – " and handles ":00" omission, so both sub-variants match.
       const aptCards = Array.from(document.querySelectorAll('[data-apt-card]')) as HTMLElement[];
       for (const card of aptCards) {
+        // First: try the specific time span selector used in both E1 and E2
+        // (class contains "font-medium" and "leading-tight" — the time badge span)
+        const timeSpanDirect = card.querySelector(
+          'span[class*="font-medium"][class*="leading-tight"], span[class*="text-[10px]"][class*="font-medium"]'
+        ) as HTMLElement | null;
+        if (timeSpanDirect) {
+          const text = collapse(timeSpanDirect.textContent ?? '');
+          if (isMatch(text)) {
+            const target = findClickable(card);
+            const cardRole = extractCardRole(target);
+            return markAndScroll(target, text, cardRole);
+          }
+        }
+        // Fallback: scan all spans in the card
         const spans = Array.from(card.querySelectorAll('span')) as HTMLElement[];
         for (const span of spans) {
           const text = collapse(span.textContent ?? '');
