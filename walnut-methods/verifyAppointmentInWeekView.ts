@@ -138,14 +138,8 @@ export async function verifyAppointmentInWeekView(ctx: WalnutContext) {
     await ctx.wait(700);
   }
 
-  // ── Step 1: Switch to Week tab ─────────────────────────────────────────────────────────────────
-  const weekTabXpath = `//button[normalize-space(text())='Week' or normalize-space(.)='Week']`;
-  const weekTabCount = await c.page.locator(`xpath=${weekTabXpath}`).count();
-  if (weekTabCount > 0) {
-    await c.page.locator(`xpath=${weekTabXpath}`).first().click();
-    await ctx.wait(700);
-    ctx.log('[WeekView] Clicked Week tab');
-  }
+  // Week tab is selected by default — no click needed.
+  ctx.log('[WeekView] Week view is active by default');
 
   // ── Step 2: Navigate to the correct week ──────────────────────────────────────────────────────
   const MAX_NAV = 52;
