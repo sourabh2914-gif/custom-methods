@@ -239,7 +239,7 @@ export async function verifyAppointmentInWeekView(ctx: WalnutContext) {
 
   // Helper: scan DOM for the appointment card and click it if found
   async function tryClickCard(): Promise<boolean> {
-    return c.page.evaluate((start: string, end: string) => {
+    return c.page.evaluate(({ start, end }: { start: string; end: string }) => {
       const candidates: HTMLElement[] = [];
       const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
       let node: Element | null;
@@ -263,7 +263,7 @@ export async function verifyAppointmentInWeekView(ctx: WalnutContext) {
       card.scrollIntoView({ behavior: 'smooth', block: 'center' });
       card.click();
       return true;
-    }, slotStart, slotEnd ?? '');
+    }, { start: slotStart, end: slotEnd ?? '' });
   }
 
   let clicked = await tryClickCard();
