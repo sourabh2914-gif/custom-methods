@@ -256,6 +256,10 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
 
       /** Check if a collapsed paragraph text matches any of our candidate ranges */
       function isMatch(text: string): boolean {
+        // Reject overly long strings — a valid time range "H:MM AM – H:MM AM" is at most ~20 chars.
+        // Parent elements that aggregate multiple slots will be much longer; skip them entirely.
+        if (text.length > 30) return false;
+
         // ── Exact full-range match (primary) ─────────────────────────────────────────────────────
         // e.g. text === "2:00 PM – 2:30 PM"  or  text === "14:00 – 14:30"
         if (text === f12 || text === f24) return true;
@@ -411,11 +415,23 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
       }
 
       // ── Final fallback: scan ALL spans on the page ─────────────────────────────────────────────
-      // Catches any card DOM where the time is in a <span> but not inside [data-apt-card]
+      // Catches any card DOM where the time is in a <span> but not inside [data-apt-card].
+      // IMPORTANT: only match spans whose OWN text (not inherited from children) equals the target.
+      // Using textContent on a parent span can pick up sibling card text — causing wrong-slot clicks.
       const allSpans = Array.from(document.querySelectorAll('span')) as HTMLElement[];
       for (const span of allSpans) {
-        const text = collapse(span.textContent ?? '');
-        if (isMatch(text)) {
+        // Use only the direct text nodes of the span (not descendants) to avoid false positives
+        // where a wrapper span accumulates text from multiple child cards.
+        const directText = Array.from(span.childNodes)
+          .filter(n => n.nodeType === Node.TEXT_NODE)
+          .map(n => n.textContent ?? '')
+          .join('');
+        const directCollapsed = collapse(directText);
+        // Also try full textContent but ONLY if this span has no element children
+        // (i.e. it's a leaf node), preventing ancestor spans from matching.
+        const isLeaf = span.querySelector('*') === null;
+        const text = isLeaf ? collapse(span.textContent ?? '') : directCollapsed;
+        if (text && isMatch(text)) {
           const target = findClickable(span);
           if (target !== span) { // only click if we found a real cursor-pointer ancestor
             const cardRole = extractCardRole(target);
@@ -489,6 +505,8 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         for (const card of aptCards2) {
           const spans2 = Array.from(card.querySelectorAll('span')) as HTMLElement[];
           for (const span of spans2) {
+            // Only leaf spans — avoids parent spans accumulating text from multiple cards
+            if (span.querySelector('*') !== null) continue;
             const norm2 = collapseAndStrip(span.textContent ?? '');
             if (norm2 === f12 || norm2 === f24) {
               const target = findClickable(card);
@@ -545,10 +563,11 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           }
         }
 
-        // XPath fallback for exact full-range match (contains full string)
+        // XPath fallback — use EXACT normalize-space match (not contains) to prevent a parent
+        // element whose accumulated text includes the target time from incorrectly matching.
         const xpaths = [
-          `//p[contains(normalize-space(.), '${f12}')]`,
-          `//p[contains(normalize-space(.), '${f24}')]`,
+          `//p[normalize-space(.) = '${f12}']`,
+          `//p[normalize-space(.) = '${f24}']`,
         ];
 
         for (const xp of xpaths) {
@@ -564,6 +583,29 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
             }
           } catch {
             // ignore invalid XPath and try next
+          }
+        }
+
+        // XPath span fallback — leaf spans only (no child elements) to avoid parent-span false hits
+        const spanXpaths = [
+          `//span[not(*) and normalize-space(.) = '${f12}']`,
+          `//span[not(*) and normalize-space(.) = '${f24}']`,
+        ];
+        for (const xp of spanXpaths) {
+          try {
+            const result = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+            const span = result.singleNodeValue as HTMLElement | null;
+            if (span) {
+              const text = (span.textContent ?? '').replace(/\s+/g, ' ').trim();
+              const target = findClickable(span);
+              if (target !== span) {
+                const cardRole = extractCardRole(target);
+                target.click();
+                return { clicked: true, matched: text, cardRole };
+              }
+            }
+          } catch {
+            // ignore
           }
         }
 
