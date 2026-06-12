@@ -223,107 +223,57 @@ export async function verifyAppointmentInWeekView(ctx: WalnutContext) {
     throw new Error(`[WeekView] Could not navigate to the week containing "${bookedDateRaw}" within ${MAX_NAV} attempts.`);
   }
 
-  // ── Step 3: Find and verify the appointment card ───────────────────────────────────────────────
-  // The slot text stored as "selectedSlot" looks like "04:00 PM – 04:30 PM" (from the slot picker)
-  // The card on screen shows "04:00 PM – 04:30 PM" inside the card body.
-  // Use the start-time portion for matching since it's unique enough.
+  // ── Step 3 & 4: Find the appointment card and click it ────────────────────────────────────────
+  // The card on screen contains: doctor name, "PENDING" badge, and "04:00 PM – 04:30 PM".
+  // The grid cells also contain "+" buttons whose parent divs may also match a broad time search.
+  // Strategy: use DOM walk to find the SMALLEST element that contains the full slot text,
+  // excluding any element that is just a "+" button or empty grid cell.
 
-  const slotStartLabel = slotText.split(/\s*[-–]\s*/)[0].trim(); // "04:00 PM"
-  ctx.log(`[WeekView] Looking for card containing: "${slotStartLabel}" in day column ${targetDay}`);
+  const slotStartLabel = slotText.split(/\s*[-–]\s*/)[0].trim(); // e.g. "04:00 PM"
+  ctx.log(`[WeekView] Looking for appointment card with slot start: "${slotStartLabel}"`);
 
-  // Give the page a moment to render after navigation
   await ctx.wait(400);
 
-  // Try CSS :has-text selectors (Playwright-specific)
-  const cardSelectors = [
-    `[class*="event"]:has-text("${slotStartLabel}")`,
-    `[class*="appointment"]:has-text("${slotStartLabel}")`,
-    `[class*="slot"]:has-text("${slotStartLabel}")`,
-    `[class*="booking"]:has-text("${slotStartLabel}")`,
-    `[class*="card"]:has-text("${slotStartLabel}")`,
-    `div:has-text("${slotStartLabel}")`,
-  ];
-
-  let cardFound    = false;
-  let matchedSel   = '';
-
-  for (const sel of cardSelectors) {
-    try {
-      const count = await c.page.locator(sel).count();
-      if (count > 0) {
-        ctx.log(`[WeekView] Card matched selector "${sel}" (count: ${count})`);
-        cardFound  = true;
-        matchedSel = sel;
-        break;
-      }
-    } catch (_) { /* invalid selector for current DOM — skip */ }
-  }
-
-  if (!cardFound) {
-    // DOM-walk fallback: find smallest element whose innerText contains the slot start label
-    const found: string = await c.page.evaluate((startLabel: string) => {
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-      let node: Element | null;
-      while ((node = walker.nextNode() as Element)) {
-        const tag = node.tagName.toLowerCase();
-        if (['html', 'body', 'head', 'header', 'nav', 'script', 'style'].includes(tag)) continue;
-        const text = (node as HTMLElement).innerText?.trim() ?? '';
-        if (text.includes(startLabel) && text.length < 300) return text;
-      }
-      return '';
-    }, slotStartLabel);
-
-    if (found) {
-      ctx.log(`[WeekView] Card found via DOM walk: "${found.substring(0, 80)}"`);
-      cardFound = true;
+  // DOM walk: find the smallest element containing the slot start time
+  // that also looks like a real card (has meaningful surrounding text, not just "+")
+  const clicked: boolean = await c.page.evaluate((startLabel: string) => {
+    // Collect all elements whose innerText contains the slot start label
+    const candidates: HTMLElement[] = [];
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+    let node: Element | null;
+    while ((node = walker.nextNode() as Element)) {
+      const tag = node.tagName.toLowerCase();
+      if (['html', 'body', 'head', 'script', 'style', 'noscript'].includes(tag)) continue;
+      const el = node as HTMLElement;
+      const text = el.innerText?.trim() ?? '';
+      if (!text.includes(startLabel)) continue;
+      // Exclude bare grid cells: must have more content than just the time label
+      // A real card will contain doctor name / status text (length > label + 10)
+      if (text.length <= startLabel.length + 5) continue;
+      // Exclude the grid cell "+" buttons — their parent text is usually just "+"
+      if (text === '+') continue;
+      candidates.push(el);
     }
-  }
 
-  if (!cardFound) {
+    if (candidates.length === 0) return false;
+
+    // Pick the SMALLEST element (fewest characters) that still has card-like content.
+    // This avoids large wrapper divs and targets the actual card container.
+    candidates.sort((a, b) => (a.innerText?.length ?? 0) - (b.innerText?.length ?? 0));
+
+    // Skip elements that are just time labels or icon cells (< 20 chars)
+    const card = candidates.find(el => (el.innerText?.trim().length ?? 0) > 20) ?? candidates[0];
+
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.click();
+    return true;
+  }, slotStartLabel);
+
+  if (!clicked) {
     throw new Error(
       `[WeekView] Appointment card for slot "${slotText}" was NOT found in the week grid. ` +
       `Expected a card containing "${slotStartLabel}" in the column for day ${bookedDateRaw}.`
     );
-  }
-
-  // ── Step 4: Scroll to and click the appointment card ──────────────────────────────────────────
-  ctx.log(`[WeekView] Scrolling to and clicking appointment card...`);
-
-  if (matchedSel) {
-    await c.page.locator(matchedSel).first().scrollIntoViewIfNeeded();
-    await ctx.wait(400);
-    await c.page.locator(matchedSel).first().click();
-    ctx.log(`[WeekView] Clicked via selector: "${matchedSel}"`);
-  } else {
-    // DOM-walk scroll + click fallback
-    await c.page.evaluate((startLabel: string) => {
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-      let node: Element | null;
-      while ((node = walker.nextNode() as Element)) {
-        const tag = node.tagName.toLowerCase();
-        if (['html', 'body', 'head', 'header', 'nav', 'script', 'style'].includes(tag)) continue;
-        const text = (node as HTMLElement).innerText?.trim() ?? '';
-        if (text.includes(startLabel) && text.length < 300) {
-          (node as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'center' });
-          return;
-        }
-      }
-    }, slotStartLabel);
-    await ctx.wait(500);
-    await c.page.evaluate((startLabel: string) => {
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-      let node: Element | null;
-      while ((node = walker.nextNode() as Element)) {
-        const tag = node.tagName.toLowerCase();
-        if (['html', 'body', 'head', 'header', 'nav', 'script', 'style'].includes(tag)) continue;
-        const text = (node as HTMLElement).innerText?.trim() ?? '';
-        if (text.includes(startLabel) && text.length < 300) {
-          (node as HTMLElement).click();
-          return;
-        }
-      }
-    }, slotStartLabel);
-    ctx.log(`[WeekView] Clicked via DOM walk`);
   }
 
   await ctx.wait(500);
