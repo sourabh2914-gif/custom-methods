@@ -93,22 +93,24 @@ export async function verifyAppointmentInWeekView(ctx: WalnutContext) {
     return null;
   }
 
-  // Read all visible column header day numbers from the week grid
-  // Header format: "Fri 12 (Today)" or "Sun 14" — extract the numeric day
+  // Read all visible column header day numbers from the week grid.
+  // Scans ALL elements in the DOM for text matching "Mon 15", "Fri 12 (Today)", "Sun 14" etc.
   async function getVisibleColumnDays(): Promise<number[]> {
     return c.page.evaluate(() => {
-      // Column headers are typically <th> or <div> elements with short day names + numbers
       const days: number[] = [];
-      const dayNameRe = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)/i;
-      const allEls = Array.from(document.querySelectorAll('th, [class*="header"], [class*="col-header"], [class*="dayHeader"], [class*="day-header"]'));
+      // Match "Mon 15", "Fri 12 (Today)", "Sun 14" — day name followed by a 1-2 digit number
+      const headerRe = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(\d{1,2})/i;
+      // Walk every element — column headers can be div, th, span, button, td, etc.
+      const allEls = Array.from(document.querySelectorAll('*'));
       for (const el of allEls) {
-        const text = (el as HTMLElement).innerText?.trim() ?? '';
-        if (dayNameRe.test(text)) {
-          const numMatch = text.match(/\d+/);
-          if (numMatch) days.push(parseInt(numMatch[0], 10));
-        }
+        // Only consider leaf-like elements (innerText length <= 30 to avoid large containers)
+        const raw = (el as HTMLElement).innerText;
+        if (!raw) continue;
+        const text = raw.trim();
+        if (text.length > 30) continue;
+        const m = headerRe.exec(text);
+        if (m) days.push(parseInt(m[2], 10));
       }
-      // Deduplicate and return
       return [...new Set(days)];
     });
   }
