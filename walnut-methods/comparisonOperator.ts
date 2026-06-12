@@ -2,7 +2,7 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Comparison Operator
- * description: Compare ${actualValue} using ${operator} against ${expectedValue}
+ * description: Compare $[actualValue] using ${operator} against $[expectedValue]
  * actionType: custom_comparison_operator
  * context: shared
  * needsLocator: false
@@ -10,28 +10,31 @@ import type { WalnutContext } from './walnut';
  */
 export async function comparisonOperator(ctx: WalnutContext) {
   const c = ctx as any;
-  // ctx.args[0] = actualValue  — the actual value to be validated
-  // ctx.args[1] = operator     — comparison operator string
-  // ctx.args[2] = expectedValue — the value to validate against
+  // Description: Compare $[actualValue] using ${operator} against $[expectedValue]
+  // ctx.args[0] = "actualValue"  — variable NAME from $[actualValue] → read via getVariable()
+  // ctx.args[1] = operator value — literal string from ${operator}
+  // ctx.args[2] = "expectedValue" — variable NAME from $[expectedValue] → read via getVariable()
 
-  const rawActual: string | undefined = c.args?.[0];
+  const actualVarName: string | undefined = c.args?.[0];
   const operator: string | undefined = c.args?.[1];
-  const rawExpected: string | undefined = c.args?.[2];
+  const expectedVarName: string | undefined = c.args?.[2];
 
-  if (rawActual == null) throw new Error('actualValue argument is missing');
+  if (!actualVarName) throw new Error('actualValue argument is missing');
   if (!operator) throw new Error('operator argument is missing');
-  if (rawExpected == null) throw new Error('expectedValue argument is missing');
+  if (!expectedVarName) throw new Error('expectedValue argument is missing');
 
-  // Resolve $[varName] runtime variable placeholders in actualValue and expectedValue
-  const resolve = (val: string): string =>
-    val.replace(/\$\[([^\]]+)\]/g, (_match, varName) => {
-      const stored = c.getVariable(varName);
-      if (stored == null) throw new Error(`Runtime variable "$[${varName}]" is not set`);
-      return stored;
-    });
+  // Read the runtime variable values
+  const actualStr: string = (() => {
+    const v = c.getVariable(actualVarName);
+    if (v == null) throw new Error(`Runtime variable "$[${actualVarName}]" is not set`);
+    return String(v);
+  })();
 
-  const actualStr = resolve(rawActual);
-  const expectedStr = resolve(rawExpected);
+  const expectedStr: string = (() => {
+    const v = c.getVariable(expectedVarName);
+    if (v == null) throw new Error(`Runtime variable "$[${expectedVarName}]" is not set`);
+    return String(v);
+  })();
 
   // Normalize: trim leading/trailing whitespace and collapse internal whitespace.
   // UI-captured text often contains extra spaces, newlines, or non-breaking spaces.
