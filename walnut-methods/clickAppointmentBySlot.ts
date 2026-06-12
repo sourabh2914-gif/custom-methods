@@ -379,26 +379,6 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   // Wait for scroll to settle and any lazy-rendered cards to appear in the DOM
   await c.wait(700);
 
-  // ── Diagnostic: log all time-like texts found in the DOM after scrolling ─────────────────────
-  // This helps diagnose "card not found" errors by showing exactly what time strings are present.
-  const domTimeTexts: string[] = await c.page.evaluate(() => {
-    const results: string[] = [];
-    const seen = new Set<string>();
-    // Scan all leaf text nodes in p, span elements for time-like patterns
-    const els = Array.from(document.querySelectorAll('p, span')) as HTMLElement[];
-    for (const el of els) {
-      const text = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
-      if (!text || text.length > 35 || seen.has(text)) continue;
-      // Only log texts that look like times or time ranges
-      if (/\d{1,2}:\d{2}/.test(text) || /\d{1,2}\s*(AM|PM)/i.test(text)) {
-        seen.add(text);
-        results.push(text);
-      }
-    }
-    return results.slice(0, 40); // cap at 40 entries
-  });
-  ctx.log(`DOM time texts after scroll: ${JSON.stringify(domTimeTexts)}`);
-
   const clickResult: { clicked: boolean; matched: string; cardRole: string } = await c.page.evaluate(
     ({ f12, f24, s12, e12, s24, e24, marker }: {
       f12: string; f24: string;
@@ -415,27 +395,52 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         return text.replace(/\s+/g, ' ').trim();
       }
 
+      /**
+       * Normalise a single time token for flexible matching:
+       *   "1:00 PM" → "1 PM"   (strip :00 minutes)
+       *   "01:30 PM" → "1:30 PM" (strip leading zero)
+       *   "13:00" → "13:00"    (24h kept as-is)
+       */
+      function normToken(t: string): string {
+        // Strip leading zero on hour
+        let s = t.replace(/\b0(\d)(:\d{2})/g, '$1$2');
+        // Strip :00 minutes when they're on the hour: "1:00 PM" → "1 PM", "13:00" → "13"
+        s = s.replace(/\b(\d{1,2}):00(\s*(AM|PM))/gi, '$1$2');
+        s = s.replace(/\b(\d{1,2}):00$/, '$1');
+        return s.trim();
+      }
+
+      /** Build all normalised forms of a full range string for comparison */
+      function normRange(range: string): string {
+        // Normalise separator to ' – '
+        const parts = range.replace(/\s*[-–—]\s*/g, '|||').split('|||');
+        return parts.map(normToken).join(' – ');
+      }
+
       /** Check if a collapsed paragraph text matches any of our candidate ranges */
       function isMatch(text: string): boolean {
-        // Reject overly long strings — a valid time range "H:MM AM – H:MM AM" is at most ~20 chars.
+        // Reject overly long strings — a valid time range "H:MM AM – H:MM AM" is at most ~22 chars.
         // Parent elements that aggregate multiple slots will be much longer; skip them entirely.
         if (text.length > 30) return false;
 
         // ── Exact full-range match (primary) ─────────────────────────────────────────────────────
-        // e.g. text === "2:00 PM – 2:30 PM"  or  text === "14:00 – 14:30"
         if (text === f12 || text === f24) return true;
 
         // ── Normalised separator variants ─────────────────────────────────────────────────────────
-        // Some browsers render the en-dash differently; normalise and retry
         const norm = text.replace(/\s*[-–—]\s*/g, ' – ');
         if (norm === f12 || norm === f24) return true;
 
         // ── Zero-pad / strip comparison ───────────────────────────────────────────────────────────
-        // Strip leading zeros from the card text and compare with our normalised candidates.
-        // e.g. "02:00 PM – 02:30 PM" → "2:00 PM – 2:30 PM" === f12  ✓
-        // This avoids partial substring hits like "2:00 PM" matching inside "01:30 PM – 02:00 PM".
         const stripped = norm.replace(/\b0(\d)(:\d{2})/g, '$1$2');
         if (stripped === f12 || stripped === f24) return true;
+
+        // ── :00 minute omission — DOM may render "1:00 PM" as "1 PM" ────────────────────────────
+        // e.g. card shows "12:30 PM - 1 PM" but target is "12:30 PM – 1:00 PM"
+        // Normalise both the card text and our candidates by stripping :00 minutes.
+        const normText   = normRange(text);
+        const normF12    = normRange(f12);
+        const normF24    = normRange(f24);
+        if (normText === normF12 || normText === normF24) return true;
 
         return false;
       }
