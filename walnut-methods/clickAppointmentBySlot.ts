@@ -255,94 +255,149 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   // the current viewport (e.g. 12:30 PM when only 9–10 AM is visible), the card may not be
   // rendered yet. We scroll by time-position so the card is in the DOM before querying it.
   await c.page.evaluate(({ start24, start12 }: { start24: string; start12: string }) => {
-    // Find the scrollable modal body — look for the deepest overflow-y:auto/scroll container
-    // that is large enough to be the calendar panel (height > 200px).
-    function findScrollable(): HTMLElement | null {
-      // Prefer a dialog/modal content element if present
+
+    // ── Convert time string to minutes since midnight ────────────────────────────────────────────
+    // Handles both "12:30" (24h) and "12:30 PM" (12h)
+    function toMinutes(t: string): number {
+      const t24 = t.trim().match(/^(\d{1,2}):(\d{2})$/);
+      if (t24) return parseInt(t24[1], 10) * 60 + parseInt(t24[2], 10);
+      const t12 = t.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+      if (t12) {
+        let h = parseInt(t12[1], 10);
+        const min = parseInt(t12[2], 10);
+        const p = t12[3].toUpperCase();
+        if (p === 'PM' && h !== 12) h += 12;
+        if (p === 'AM' && h === 12) h = 0;
+        return h * 60 + min;
+      }
+      return -1;
+    }
+
+    const targetMins = toMinutes(start24) >= 0 ? toMinutes(start24) : toMinutes(start12);
+    if (targetMins < 0) return; // can't parse — skip pre-scroll
+
+    // ── Find the modal's scrollable calendar container ────────────────────────────────────────────
+    // We want the INNERMOST scrollable container that:
+    //   1. Has overflow-y auto/scroll
+    //   2. Has scrollable content (scrollHeight > clientHeight)
+    //   3. Has visible height >= 150px (rules out tiny dropdowns)
+    //   4. Is NOT the document body/html (those scroll the whole page, not the modal)
+    function findCalendarScrollable(): HTMLElement | null {
       const candidates = Array.from(document.querySelectorAll('*')) as HTMLElement[];
       let best: HTMLElement | null = null;
-      let bestHeight = 0;
+      let bestScrollable = 0;
+
       for (const el of candidates) {
+        if (el === document.body || el.tagName === 'HTML') continue;
         const style = window.getComputedStyle(el);
-        const overflow = style.overflowY;
-        if (overflow !== 'auto' && overflow !== 'scroll') continue;
+        const ov = style.overflowY;
+        if (ov !== 'auto' && ov !== 'scroll') continue;
+        const scrollable = el.scrollHeight - el.clientHeight;
+        if (scrollable < 50) continue; // not meaningfully scrollable
         const rect = el.getBoundingClientRect();
-        if (rect.height < 200) continue; // skip tiny scrollable areas
-        if (rect.height > bestHeight) {
-          bestHeight = rect.height;
+        if (rect.height < 150) continue; // too small
+        if (scrollable > bestScrollable) {
+          bestScrollable = scrollable;
           best = el;
         }
       }
       return best;
     }
 
-    // Parse "H:MM" or "HH:MM" to total minutes since midnight
-    function toMinutes(timeStr: string): number {
-      const parts = timeStr.trim().split(':');
-      if (parts.length < 2) return 0;
-      return parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10);
-    }
-
-    // Strategy A: find a time-label span in the DOM to use as scroll anchor.
-    // The calendar renders hour rows with labels like "9 AM", "10 AM", etc.
-    // Find the label closest to (but not past) our target time and scroll to it.
-    const targetMins = toMinutes(start24) || (() => {
-      // Parse 12h format: "12:30 PM" → 750 minutes
-      const m = start12.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
-      if (!m) return 0;
-      let h = parseInt(m[1], 10);
-      if (m[3].toUpperCase() === 'PM' && h !== 12) h += 12;
-      if (m[3].toUpperCase() === 'AM' && h === 12) h = 0;
-      return h * 60 + parseInt(m[2], 10);
-    })();
-
-    // Try to find a rendered time-label element to scroll into view
-    const allElements = Array.from(document.querySelectorAll('span, div')) as HTMLElement[];
-    let bestEl: HTMLElement | null = null;
+    // ── Strategy A: find a rendered time-label SPAN (leaf, exact match) and scroll to it ─────────
+    // The calendar renders hour/half-hour labels in spans like "9 AM", "9:30 AM", "12 PM" etc.
+    // We use ONLY spans (not divs) with exact time-label text to avoid false matches on
+    // composite divs whose textContent aggregates multiple labels.
+    const labelSpans = Array.from(document.querySelectorAll('span')) as HTMLElement[];
+    let bestLabelEl: HTMLElement | null = null;
     let bestDiff = Infinity;
 
-    for (const el of allElements) {
-      const text = (el.textContent ?? '').trim();
-      // Match time labels: "9 AM", "9:30 AM", "09:00", etc.
-      const m12 = text.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i);
-      const m24 = text.match(/^(\d{1,2}):(\d{2})$/);
-      let elMins = -1;
-      if (m12) {
-        let h = parseInt(m12[1], 10);
-        const min = parseInt(m12[2] ?? '0', 10);
-        if (m12[3].toUpperCase() === 'PM' && h !== 12) h += 12;
-        if (m12[3].toUpperCase() === 'AM' && h === 12) h = 0;
-        elMins = h * 60 + min;
-      } else if (m24) {
-        elMins = parseInt(m24[1], 10) * 60 + parseInt(m24[2], 10);
-      }
-      if (elMins < 0) continue;
-      const diff = Math.abs(elMins - targetMins);
+    for (const span of labelSpans) {
+      // Must be a leaf or near-leaf (textContent === own text)
+      const text = (span.textContent ?? '').trim();
+      if (!text || text.length > 12) continue; // time labels are short
+      const mins = toMinutes(text);
+      if (mins < 0) continue;
+      const diff = Math.abs(mins - targetMins);
       if (diff < bestDiff) {
         bestDiff = diff;
-        bestEl = el;
+        bestLabelEl = span;
       }
     }
 
-    if (bestEl) {
-      bestEl.scrollIntoView({ behavior: 'instant', block: 'center' });
+    if (bestLabelEl && bestDiff <= 60) {
+      // Found a time label within 60 min of target — scroll it into center
+      bestLabelEl.scrollIntoView({ behavior: 'instant', block: 'center' });
       return;
     }
 
-    // Fallback: scroll the modal container by estimated pixel offset
-    // Assumption: calendar starts at 00:00, each hour = ~80px (common for day-view calendars)
-    const scrollable = findScrollable();
-    if (scrollable) {
-      const pxPerHour = 80;
-      const calendarStartHour = 0;
-      const targetHour = targetMins / 60;
-      const targetPx = (targetHour - calendarStartHour) * pxPerHour;
-      scrollable.scrollTop = Math.max(0, targetPx - 100); // offset 100px above target
+    // ── Strategy B: scroll the calendar container by computed pixel offset ───────────────────────
+    // Measure the pixel-per-minute ratio from two visible time labels, then scroll proportionally.
+    const scrollContainer = findCalendarScrollable();
+    if (!scrollContainer) return;
+
+    // Try to detect px-per-hour from the DOM by finding two time labels with known positions
+    const timeLabels: { mins: number; top: number }[] = [];
+    for (const span of labelSpans) {
+      const text = (span.textContent ?? '').trim();
+      if (!text || text.length > 12) continue;
+      const mins = toMinutes(text);
+      if (mins < 0) continue;
+      const rect = span.getBoundingClientRect();
+      const containerRect = scrollContainer.getBoundingClientRect();
+      const relTop = rect.top - containerRect.top + scrollContainer.scrollTop;
+      timeLabels.push({ mins, top: relTop });
     }
+
+    if (timeLabels.length >= 2) {
+      // Sort by position and compute px-per-minute from the first two distinct labels
+      timeLabels.sort((a, b) => a.top - b.top);
+      let pxPerMin = 2; // default: ~120px/hour
+      for (let i = 1; i < timeLabels.length; i++) {
+        const dMin = timeLabels[i].mins - timeLabels[i - 1].mins;
+        const dPx  = timeLabels[i].top  - timeLabels[i - 1].top;
+        if (dMin > 0 && dPx > 0) {
+          pxPerMin = dPx / dMin;
+          break;
+        }
+      }
+      const firstLabel = timeLabels[0];
+      const targetPx = firstLabel.top + (targetMins - firstLabel.mins) * pxPerMin;
+      scrollContainer.scrollTop = Math.max(0, targetPx - scrollContainer.clientHeight / 2);
+      return;
+    }
+
+    // ── Strategy C: last-resort — use proportional scroll based on assumed calendar bounds ────────
+    // Assume calendar shows 0:00–24:00 (or 8:00–20:00) and scroll proportionally.
+    const calStartMins = 0;
+    const calEndMins   = 24 * 60;
+    const ratio = (targetMins - calStartMins) / (calEndMins - calStartMins);
+    scrollContainer.scrollTop = ratio * scrollContainer.scrollHeight - scrollContainer.clientHeight / 2;
+
   }, { start24, start12 });
 
   // Wait for scroll to settle and any lazy-rendered cards to appear in the DOM
-  await c.wait(600);
+  await c.wait(700);
+
+  // ── Diagnostic: log all time-like texts found in the DOM after scrolling ─────────────────────
+  // This helps diagnose "card not found" errors by showing exactly what time strings are present.
+  const domTimeTexts: string[] = await c.page.evaluate(() => {
+    const results: string[] = [];
+    const seen = new Set<string>();
+    // Scan all leaf text nodes in p, span elements for time-like patterns
+    const els = Array.from(document.querySelectorAll('p, span')) as HTMLElement[];
+    for (const el of els) {
+      const text = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+      if (!text || text.length > 35 || seen.has(text)) continue;
+      // Only log texts that look like times or time ranges
+      if (/\d{1,2}:\d{2}/.test(text) || /\d{1,2}\s*(AM|PM)/i.test(text)) {
+        seen.add(text);
+        results.push(text);
+      }
+    }
+    return results.slice(0, 40); // cap at 40 entries
+  });
+  ctx.log(`DOM time texts after scroll: ${JSON.stringify(domTimeTexts)}`);
 
   const clickResult: { clicked: boolean; matched: string; cardRole: string } = await c.page.evaluate(
     ({ f12, f24, s12, e12, s24, e24, marker }: {
