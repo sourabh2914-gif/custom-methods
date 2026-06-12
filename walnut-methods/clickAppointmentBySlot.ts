@@ -234,16 +234,28 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
 
   // ── Step 4: Find and click the matching appointment card ──────────────────────────────────────
   //
-  // Strategy A: querySelector scan — walk all <p> elements, match time text, then walk up
-  //             to <div class="cursor-pointer ..."> and click it.
-  //
-  // Strategy B: XPath fallback — same logic expressed in XPath if Strategy A finds nothing.
+  // The modal calendar is scrollable — slots below the visible area must be scrolled into view
+  // before clicking. Strategy:
+  //   1. evaluate() finds the matching element and scrolls it into view (scrollIntoView),
+  //      marks it with a unique data attribute, and returns metadata (matched text, role).
+  //      It does NOT call .click() — clicking an off-screen element inside overflow:scroll fails.
+  //   2. After evaluate(), wait briefly for scroll animation, then use Playwright's native
+  //      locator click (which handles viewport scrolling and pointer events correctly).
+  //   3. Remove the temporary marker attribute after clicking.
+
+  const MARKER = 'data-walnut-apt-target';
+
+  // Clean up any leftover marker from a previous run
+  await c.page.evaluate((marker: string) => {
+    document.querySelectorAll(`[${marker}]`).forEach((el: Element) => el.removeAttribute(marker));
+  }, MARKER);
 
   const clickResult: { clicked: boolean; matched: string; cardRole: string } = await c.page.evaluate(
-    ({ f12, f24, s12, e12, s24, e24 }: {
+    ({ f12, f24, s12, e12, s24, e24, marker }: {
       f12: string; f24: string;
       s12: string; e12: string;
       s24: string; e24: string;
+      marker: string;
     }) => {
       /**
        * Collapse all whitespace/newlines in a string and trim.
@@ -313,6 +325,17 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         return '';
       }
 
+      /**
+       * Mark the target element with a unique attribute, scroll it into view inside its
+       * scrollable container, and return. The actual click is done by Playwright after
+       * the scroll completes so that pointer events fire correctly.
+       */
+      function markAndScroll(target: HTMLElement, matched: string, cardRole: string): { clicked: boolean; matched: string; cardRole: string } {
+        target.setAttribute(marker, 'true');
+        target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+        return { clicked: true, matched, cardRole };
+      }
+
       // ── Variants A/B/C: scan all <p> tags for time match ─────────────────────────────────────
       // Variant A: <p class="text-[10px] leading-tight" ...>
       // Variant B: <p class="text-[10px] text-text-gray"> with 24h format
@@ -323,8 +346,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         if (isMatch(text)) {
           const target = findClickable(p as HTMLElement);
           const cardRole = extractCardRole(target);
-          target.click();
-          return { clicked: true, matched: text, cardRole };
+          return markAndScroll(target, text, cardRole);
         }
       }
 
@@ -345,8 +367,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           if (isMatch(text)) {
             const target = findClickable(card);
             const cardRole = extractCardRole(target);
-            target.click();
-            return { clicked: true, matched: text, cardRole };
+            return markAndScroll(target, text, cardRole);
           }
         }
       }
@@ -404,12 +425,11 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         const rowRange = `${startLabel} – ${endLabel}`;
 
         if (isMatch(rowRange)) {
-          // Found the matching row — click the cursor-pointer card inside it
+          // Found the matching row — scroll and click the cursor-pointer card inside it
           const card = row.querySelector('[class*="cursor-pointer"]') as HTMLElement | null;
           if (card) {
             const cardRole = extractCardRole(card);
-            card.click();
-            return { clicked: true, matched: rowRange, cardRole };
+            return markAndScroll(card, rowRange, cardRole);
           }
         }
       }
@@ -435,16 +455,32 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           const target = findClickable(span);
           if (target !== span) { // only click if we found a real cursor-pointer ancestor
             const cardRole = extractCardRole(target);
-            target.click();
-            return { clicked: true, matched: text, cardRole };
+            return markAndScroll(target, text, cardRole);
           }
         }
       }
 
       return { clicked: false, matched: '', cardRole: '' };
     },
-    { f12: full12, f24: full24, s12: start12, e12: end12, s24: start24, e24: end24 }
+    { f12: full12, f24: full24, s12: start12, e12: end12, s24: start24, e24: end24, marker: MARKER }
   );
+
+  // ── Playwright native click on the marked element ────────────────────────────────────────────
+  // evaluate() scrolled the element into view and marked it with MARKER.
+  // Now use Playwright's locator to actually click it — this fires proper pointer events
+  // and works correctly even inside overflow:scroll modal containers.
+  if (clickResult.clicked) {
+    // Wait for smooth scroll animation to settle (300ms is typical)
+    await c.wait(400);
+    try {
+      await c.page.locator(`[${MARKER}]`).first().click({ timeout: 5000 });
+    } finally {
+      // Remove the marker attribute regardless of click success/failure
+      await c.page.evaluate((marker: string) => {
+        document.querySelectorAll(`[${marker}]`).forEach((el: Element) => el.removeAttribute(marker));
+      }, MARKER);
+    }
+  }
 
   // Role extracted from the clicked card — used to verify detail panel update
   let cardRole = clickResult.cardRole;
@@ -454,7 +490,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
     ctx.log('querySelector scan found no match — trying XPath fallback...');
 
     const xpathResult: { clicked: boolean; matched: string; cardRole: string } = await c.page.evaluate(
-      ({ s12, e12, s24, e24, f12, f24 }: { s12: string; e12: string; s24: string; e24: string; f12: string; f24: string }) => {
+      ({ s12, e12, s24, e24, f12, f24, marker }: { s12: string; e12: string; s24: string; e24: string; f12: string; f24: string; marker: string }) => {
         function findClickable(el: HTMLElement): HTMLElement {
           let cur: HTMLElement | null = el;
           while (cur) {
@@ -480,9 +516,13 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           return '';
         }
 
+        function markAndScroll2(target: HTMLElement, matched: string, cardRole: string): { clicked: boolean; matched: string; cardRole: string } {
+          target.setAttribute(marker, 'true');
+          target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+          return { clicked: true, matched, cardRole };
+        }
+
         // Match the FULL range string to avoid false positives.
-        // e.g. "01:30 PM – 02:00 PM" must NOT match when target is "02:00 PM – 02:30 PM".
-        // Strategy: find all <p> tags, strip leading zeros from their text, compare to full12/full24.
         function collapseAndStrip(t: string): string {
           return t.replace(/\s+/g, ' ').trim()
                   .replace(/\s*[-\u2013\u2014]\s*/g, ' \u2013 ')
@@ -495,8 +535,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
             const text = (p.textContent ?? '').replace(/\s+/g, ' ').trim();
             const target = findClickable(p);
             const cardRole = extractCardRole(target);
-            target.click();
-            return { clicked: true, matched: text, cardRole };
+            return markAndScroll2(target, text, cardRole);
           }
         }
 
@@ -511,8 +550,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
             if (norm2 === f12 || norm2 === f24) {
               const target = findClickable(card);
               const cardRole = extractCardRole(target);
-              target.click();
-              return { clicked: true, matched: norm2, cardRole };
+              return markAndScroll2(target, norm2, cardRole);
             }
           }
         }
@@ -557,14 +595,12 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
             const card = row.querySelector('[class*="cursor-pointer"]') as HTMLElement | null;
             if (card) {
               const cardRole = extractCardRole(card);
-              card.click();
-              return { clicked: true, matched: rowRange, cardRole };
+              return markAndScroll2(card, rowRange, cardRole);
             }
           }
         }
 
-        // XPath fallback — use EXACT normalize-space match (not contains) to prevent a parent
-        // element whose accumulated text includes the target time from incorrectly matching.
+        // XPath fallback — EXACT normalize-space match (not contains)
         const xpaths = [
           `//p[normalize-space(.) = '${f12}']`,
           `//p[normalize-space(.) = '${f24}']`,
@@ -578,15 +614,14 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
               const text = (p.textContent ?? '').replace(/\s+/g, ' ').trim();
               const target = findClickable(p);
               const cardRole = extractCardRole(target);
-              target.click();
-              return { clicked: true, matched: text, cardRole };
+              return markAndScroll2(target, text, cardRole);
             }
           } catch {
             // ignore invalid XPath and try next
           }
         }
 
-        // XPath span fallback — leaf spans only (no child elements) to avoid parent-span false hits
+        // XPath span fallback — leaf spans only
         const spanXpaths = [
           `//span[not(*) and normalize-space(.) = '${f12}']`,
           `//span[not(*) and normalize-space(.) = '${f24}']`,
@@ -600,8 +635,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
               const target = findClickable(span);
               if (target !== span) {
                 const cardRole = extractCardRole(target);
-                target.click();
-                return { clicked: true, matched: text, cardRole };
+                return markAndScroll2(target, text, cardRole);
               }
             }
           } catch {
@@ -611,7 +645,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
 
         return { clicked: false, matched: '', cardRole: '' };
       },
-      { s12: start12, e12: end12, s24: start24, e24: end24, f12: full12, f24: full24 }
+      { s12: start12, e12: end12, s24: start24, e24: end24, f12: full12, f24: full24, marker: MARKER }
     );
 
     if (!xpathResult.clicked) {
@@ -620,6 +654,16 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         `Tried 12h format "${full12}" and 24h format "${full24}". ` +
         `Check that the slot value matches the time displayed in the appointment cards.`
       );
+    }
+
+    // Playwright native click after scroll (same as primary path)
+    await c.wait(400);
+    try {
+      await c.page.locator(`[${MARKER}]`).first().click({ timeout: 5000 });
+    } finally {
+      await c.page.evaluate((marker: string) => {
+        document.querySelectorAll(`[${marker}]`).forEach((el: Element) => el.removeAttribute(marker));
+      }, MARKER);
     }
 
     cardRole = xpathResult.cardRole;
