@@ -224,55 +224,76 @@ export async function verifyAppointmentInWeekView(ctx: WalnutContext) {
   }
 
   // ── Step 3 & 4: Find the appointment card and click it ────────────────────────────────────────
-  // The card on screen contains: doctor name, "PENDING" badge, and "04:00 PM – 04:30 PM".
-  // The grid cells also contain "+" buttons whose parent divs may also match a broad time search.
-  // Strategy: use DOM walk to find the SMALLEST element that contains the full slot text,
-  // excluding any element that is just a "+" button or empty grid cell.
+  // selectedSlot = "08:00 PM – 08:30 PM" (en-dash from slot picker)
+  // Card on screen = "08:00 PM – 08:30 PM" (may use en-dash or hyphen)
+  // Problem: matching start time "08:00 PM" alone hits previous card's END time "07:30 PM – 08:00 PM"
+  // Fix: require card contains BOTH start time AND end time of the slot.
 
-  const slotStartLabel = slotText.split(/\s*[-–]\s*/)[0].trim(); // e.g. "04:00 PM"
-  ctx.log(`[WeekView] Looking for appointment card with slot start: "${slotStartLabel}"`);
+  const slotParts   = slotText.split(/\s*[–—\-]\s*/);
+  const slotStart   = slotParts[0].trim();  // "08:00 PM"
+  const slotEnd     = slotParts[1]?.trim(); // "08:30 PM"
+
+  ctx.log(`[WeekView] Looking for card with start="${slotStart}" end="${slotEnd}"`);
 
   await ctx.wait(400);
 
-  // DOM walk: find the smallest element containing the slot start time
-  // that also looks like a real card (has meaningful surrounding text, not just "+")
-  const clicked: boolean = await c.page.evaluate((startLabel: string) => {
-    // Collect all elements whose innerText contains the slot start label
-    const candidates: HTMLElement[] = [];
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-    let node: Element | null;
-    while ((node = walker.nextNode() as Element)) {
-      const tag = node.tagName.toLowerCase();
-      if (['html', 'body', 'head', 'script', 'style', 'noscript'].includes(tag)) continue;
-      const el = node as HTMLElement;
-      const text = el.innerText?.trim() ?? '';
-      if (!text.includes(startLabel)) continue;
-      // Exclude bare grid cells: must have more content than just the time label
-      // A real card will contain doctor name / status text (length > label + 10)
-      if (text.length <= startLabel.length + 5) continue;
-      // Exclude the grid cell "+" buttons — their parent text is usually just "+"
-      if (text === '+') continue;
-      candidates.push(el);
+  // Helper: scan DOM for the appointment card and click it if found
+  async function tryClickCard(): Promise<boolean> {
+    return c.page.evaluate((start: string, end: string) => {
+      const candidates: HTMLElement[] = [];
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+      let node: Element | null;
+      while ((node = walker.nextNode() as Element)) {
+        const tag = node.tagName.toLowerCase();
+        if (['html', 'body', 'head', 'script', 'style', 'noscript'].includes(tag)) continue;
+        const el = node as HTMLElement;
+        const raw = el.innerText?.trim() ?? '';
+        if (!raw) continue;
+        if (!raw.includes(start)) continue;
+        // Require end time too — prevents matching a previous card whose END time = our START time
+        if (end && !raw.includes(end)) continue;
+        // Must be a real card, not a bare time label or "+" cell
+        if (raw.length <= start.length + 5) continue;
+        candidates.push(el);
+      }
+      if (candidates.length === 0) return false;
+      // Pick smallest element with card-like content (> 20 chars)
+      candidates.sort((a, b) => (a.innerText?.length ?? 0) - (b.innerText?.length ?? 0));
+      const card = candidates.find(el => (el.innerText?.trim().length ?? 0) > 20) ?? candidates[0];
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      card.click();
+      return true;
+    }, slotStart, slotEnd ?? '');
+  }
+
+  let clicked = await tryClickCard();
+
+  if (!clicked) {
+    // Card may be hidden under a "+N more" overflow button — find and click it to expand
+    ctx.log(`[WeekView] Card not found directly — looking for "+N more" overflow to expand`);
+    const expandClicked: boolean = await c.page.evaluate(() => {
+      const allEls = Array.from(document.querySelectorAll('*'));
+      for (const el of allEls) {
+        const text = (el as HTMLElement).innerText?.trim() ?? '';
+        if (/^\+\d+\s*more$/i.test(text)) {
+          (el as HTMLElement).click();
+          return true;
+        }
+      }
+      return false;
+    });
+
+    if (expandClicked) {
+      ctx.log(`[WeekView] Clicked "+N more" — waiting for card to appear`);
+      await ctx.wait(600);
+      clicked = await tryClickCard();
     }
-
-    if (candidates.length === 0) return false;
-
-    // Pick the SMALLEST element (fewest characters) that still has card-like content.
-    // This avoids large wrapper divs and targets the actual card container.
-    candidates.sort((a, b) => (a.innerText?.length ?? 0) - (b.innerText?.length ?? 0));
-
-    // Skip elements that are just time labels or icon cells (< 20 chars)
-    const card = candidates.find(el => (el.innerText?.trim().length ?? 0) > 20) ?? candidates[0];
-
-    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    card.click();
-    return true;
-  }, slotStartLabel);
+  }
 
   if (!clicked) {
     throw new Error(
       `[WeekView] Appointment card for slot "${slotText}" was NOT found in the week grid. ` +
-      `Expected a card containing "${slotStartLabel}" in the column for day ${bookedDateRaw}.`
+      `Expected a card with start="${slotStart}" end="${slotEnd}" in column for day ${bookedDateRaw}.`
     );
   }
 
