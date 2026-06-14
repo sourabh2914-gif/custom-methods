@@ -2,7 +2,7 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Click Appointment By Slot
- * description: Click the appointment card matching $[selectedslot] and verify details changed
+ * description: Click the appointment card matching $[selectedslot] with optional role filter $[role] and verify details changed
  * actionType: custom_click_appointment_by_slot
  * context: web
  * needsLocator: false
@@ -10,6 +10,8 @@ import type { WalnutContext } from './walnut';
  */
 export async function clickAppointmentBySlot(ctx: WalnutContext) {
   // ctx.args[0] = "selectedslot" (from $[selectedslot]) — runtime variable holding slot time range
+  // ctx.args[1] = "role" (from $[role]) — optional runtime variable; when set, disambiguates between
+  //               multiple cards at the same slot by matching the role badge text (e.g. "Doctor", "Nurse Navigator")
   //
   // Supports SIX DOM variants (E has two sub-variants E1/E2):
   //
@@ -194,6 +196,42 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   //   isMatch() handles: norm("-"→"–") then stripped(leading zero) → "5:17 PM – 5:47 PM" === f12 ✓
   //   Handled by the same <p> scan as Variants B/C. No special-casing needed.
   //
+  // ── Multiple cards at the same slot (role disambiguation) ────────────────────────────────────────
+  //   When two appointment cards share the same time slot (e.g. 15:30–16:00), each card has a role
+  //   badge: "Nurse Navigator" (pink card) and "Doctor" (green card):
+  //
+  //   Green Doctor card DOM (from screenshot):
+  //     <div class="cursor-pointer w-full h-full">
+  //       <div class="rounded-2xl border shadow-sm p-1.5 flex items-center gap-2 w-full h-full overflow-hidden"
+  //            style="background-color: rgb(240,253,244); border-color: rgb(187,247,208);">
+  //         <div class="relative flex-shrink-0">
+  //           <div class="w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold text-white"
+  //                style="background-color: rgb(74,222,128);">DJ</div>
+  //           <div class="absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full flex items-center
+  //                       justify-center border-2 border-white" style="background-color: rgb(34,197,94);">
+  //             <svg ...></svg>
+  //           </div>
+  //         </div>
+  //         <div class="min-w-0 flex-1">
+  //           <p class="text-xs font-semibold text-text-color truncate">Dr. Johnc Smith</p>
+  //           <div class="flex items-center gap-1 flex-wrap">
+  //             <span class="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
+  //                   style="background-color: rgb(240,253,244); color: rgb(21,128,61);
+  //                          border: 1px solid rgb(187,247,208);">Doctor</span>
+  //           </div>
+  //           <p class="text-[10px] text-text-gray">
+  //             "15:30"
+  //             " – "
+  //             "16:00"
+  //           </p>
+  //         </div>
+  //       </div>
+  //     </div>
+  //
+  //   Strategy: when $[role] variable is set, ALL time-matching cards are collected first, then
+  //   the one whose <span class="text-[9px] font-bold ... rounded-full"> badge text matches the
+  //   role (case-insensitive) is preferred. If role is unset or no match, the first card is used.
+  //
   // Detection strategy:
   //   - Variant A/B/C: scan all <p> elements, match full time range text, walk up to cursor-pointer div
   //   - Variant D: find row whose two time <span> labels match start+end of target slot,
@@ -201,6 +239,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   //   - Variant E: scan data-apt-card elements, check all <span> texts for time match
   //   - Cross-format: both 12h and 24h candidates always tried (full12 + full24)
   //   - All matching uses equality (never partial includes) to avoid adjacent-slot false positives
+  //   - Role filter: when multiple cards share a slot, $[role] selects the correct card
   //
   // Steps:
   //   1. Read slot value from runtime variable
@@ -211,6 +250,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
 
   const c = ctx as any;
   const slotVarName = ctx.args[0]; // e.g. "selectedslot"
+  const roleVarName = ctx.args[1] as string | undefined; // e.g. "role" (optional)
 
   // ── Step 1: Read slot value from runtime variable ──────────────────────────────────────────────
 
@@ -222,7 +262,11 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
     );
   }
 
+  // Read optional role filter — empty string / undefined means no role filter
+  const roleFilter: string = roleVarName ? ((ctx.getVariable(roleVarName) as string | undefined) ?? '').trim() : '';
+
   ctx.log(`Slot from $[${slotVarName}]: "${rawSlot}"`);
+  if (roleFilter) ctx.log(`Role filter from $[${roleVarName}]: "${roleFilter}"`);
 
   // ── Step 2: Normalize and build match candidates ───────────────────────────────────────────────
   // We need to handle:
@@ -596,14 +640,32 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
       // Variant A: <p class="text-[10px] leading-tight" ...>
       // Variant B: <p class="text-[10px] text-text-gray"> with 24h format
       // Variant C: <p class="text-[10px] text-text-gray"> with 12h AM/PM format
+      //
+      // When roleFilter is set (multiple cards share the same slot), we collect ALL matching
+      // time-range paragraphs first, then pick the one whose card's role badge matches roleFilter.
+      // If roleFilter is empty or no role-matched card is found, fall through to first match.
       const paragraphs = Array.from(document.querySelectorAll('p'));
+      const matchedParagraphCards: { target: HTMLElement; text: string; cardRole: string }[] = [];
       for (const p of paragraphs) {
         const text = collapse(p.textContent ?? '');
         if (isMatch(text)) {
           const target = findClickable(p as HTMLElement);
           const cardRole = extractCardRole(target);
-          return markAndScroll(target, text, cardRole);
+          matchedParagraphCards.push({ target, text, cardRole });
         }
+      }
+      if (matchedParagraphCards.length > 0) {
+        // If a role filter is provided, prefer a card whose role badge matches
+        if (roleFilter) {
+          const roleMatch = matchedParagraphCards.find(
+            c => c.cardRole.trim().toLowerCase() === roleFilter.toLowerCase()
+          );
+          if (roleMatch) return markAndScroll(roleMatch.target, roleMatch.text, roleMatch.cardRole);
+          // Role filter provided but not matched — fall through to first card (log a warning)
+        }
+        // No role filter (or role not found) — use the first matching card
+        const first = matchedParagraphCards[0];
+        return markAndScroll(first.target, first.text, first.cardRole);
       }
 
       // ── Variant E: data-apt-card absolute-positioned cards with time in <span> ─────────────────
@@ -641,6 +703,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
       //
       // isMatch() normalises "-" → " – " and handles ":00" omission, so both sub-variants match.
       const aptCards = Array.from(document.querySelectorAll('[data-apt-card]')) as HTMLElement[];
+      const matchedAptCards: { target: HTMLElement; text: string; cardRole: string }[] = [];
       for (const card of aptCards) {
         // First: try the specific time span selector used in both E1 and E2
         // (class contains "font-medium" and "leading-tight" — the time badge span)
@@ -652,7 +715,8 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           if (isMatch(text)) {
             const target = findClickable(card);
             const cardRole = extractCardRole(target);
-            return markAndScroll(target, text, cardRole);
+            matchedAptCards.push({ target, text, cardRole });
+            continue;
           }
         }
         // Fallback: scan all spans in the card
@@ -662,9 +726,20 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           if (isMatch(text)) {
             const target = findClickable(card);
             const cardRole = extractCardRole(target);
-            return markAndScroll(target, text, cardRole);
+            matchedAptCards.push({ target, text, cardRole });
+            break;
           }
         }
+      }
+      if (matchedAptCards.length > 0) {
+        if (roleFilter) {
+          const roleMatch = matchedAptCards.find(
+            c => c.cardRole.trim().toLowerCase() === roleFilter.toLowerCase()
+          );
+          if (roleMatch) return markAndScroll(roleMatch.target, roleMatch.text, roleMatch.cardRole);
+        }
+        const first = matchedAptCards[0];
+        return markAndScroll(first.target, first.text, first.cardRole);
       }
 
       // ── Variant D: week-view row with two time <span> labels ──────────────────────────────────
@@ -709,6 +784,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
 
       // Scan flex row containers
       const flexRows = Array.from(document.querySelectorAll('div.flex')) as HTMLElement[];
+      const matchedFlexRowCards: { target: HTMLElement; rowRange: string; cardRole: string }[] = [];
       for (const row of flexRows) {
         // Find the time-label column: flex-col + justify-between child
         const labelCol = row.querySelector(':scope > div.flex-col.justify-between, :scope > div[class*="flex-col"][class*="justify-between"]') as HTMLElement | null;
@@ -720,13 +796,23 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         const rowRange = `${startLabel} – ${endLabel}`;
 
         if (isMatch(rowRange)) {
-          // Found the matching row — scroll and click the cursor-pointer card inside it
+          // Found a matching row — collect cursor-pointer cards inside it
           const card = row.querySelector('[class*="cursor-pointer"]') as HTMLElement | null;
           if (card) {
             const cardRole = extractCardRole(card);
-            return markAndScroll(card, rowRange, cardRole);
+            matchedFlexRowCards.push({ target: card, rowRange, cardRole });
           }
         }
+      }
+      if (matchedFlexRowCards.length > 0) {
+        if (roleFilter) {
+          const roleMatch = matchedFlexRowCards.find(
+            c => c.cardRole.trim().toLowerCase() === roleFilter.toLowerCase()
+          );
+          if (roleMatch) return markAndScroll(roleMatch.target, roleMatch.rowRange, roleMatch.cardRole);
+        }
+        const first = matchedFlexRowCards[0];
+        return markAndScroll(first.target, first.rowRange, first.cardRole);
       }
 
       // ── Final fallback: scan ALL spans on the page ─────────────────────────────────────────────
@@ -734,6 +820,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
       // IMPORTANT: only match spans whose OWN text (not inherited from children) equals the target.
       // Using textContent on a parent span can pick up sibling card text — causing wrong-slot clicks.
       const allSpans = Array.from(document.querySelectorAll('span')) as HTMLElement[];
+      const matchedSpanCards: { target: HTMLElement; text: string; cardRole: string }[] = [];
       for (const span of allSpans) {
         // Use only the direct text nodes of the span (not descendants) to avoid false positives
         // where a wrapper span accumulates text from multiple child cards.
@@ -750,14 +837,24 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           const target = findClickable(span);
           if (target !== span) { // only click if we found a real cursor-pointer ancestor
             const cardRole = extractCardRole(target);
-            return markAndScroll(target, text, cardRole);
+            matchedSpanCards.push({ target, text, cardRole });
           }
         }
+      }
+      if (matchedSpanCards.length > 0) {
+        if (roleFilter) {
+          const roleMatch = matchedSpanCards.find(
+            c => c.cardRole.trim().toLowerCase() === roleFilter.toLowerCase()
+          );
+          if (roleMatch) return markAndScroll(roleMatch.target, roleMatch.text, roleMatch.cardRole);
+        }
+        const first = matchedSpanCards[0];
+        return markAndScroll(first.target, first.text, first.cardRole);
       }
 
       return { clicked: false, matched: '', cardRole: '' };
     },
-    { f12: full12, f24: full24, s12: start12, e12: end12, s24: start24, e24: end24, marker: MARKER }
+    { f12: full12, f24: full24, s12: start12, e12: end12, s24: start24, e24: end24, marker: MARKER, roleFilter }
   );
 
   // ── Playwright native click on the marked element ────────────────────────────────────────────
@@ -785,7 +882,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
     ctx.log('querySelector scan found no match — trying XPath fallback...');
 
     const xpathResult: { clicked: boolean; matched: string; cardRole: string } = await c.page.evaluate(
-      ({ s12, e12, s24, e24, f12, f24, marker }: { s12: string; e12: string; s24: string; e24: string; f12: string; f24: string; marker: string }) => {
+      ({ s12, e12, s24, e24, f12, f24, marker, roleFilter }: { s12: string; e12: string; s24: string; e24: string; f12: string; f24: string; marker: string; roleFilter: string }) => {
         function findClickable(el: HTMLElement): HTMLElement {
           let cur: HTMLElement | null = el;
           while (cur) {
@@ -824,18 +921,28 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
                   .replace(/\b0(\d)(:\d{2})/g, '$1$2');
         }
         const allPs = Array.from(document.querySelectorAll('p')) as HTMLElement[];
+        const matchedPs: { target: HTMLElement; text: string; cardRole: string }[] = [];
         for (const p of allPs) {
           const norm = collapseAndStrip(p.textContent ?? '');
           if (norm === f12 || norm === f24) {
             const text = (p.textContent ?? '').replace(/\s+/g, ' ').trim();
             const target = findClickable(p);
             const cardRole = extractCardRole(target);
-            return markAndScroll2(target, text, cardRole);
+            matchedPs.push({ target, text, cardRole });
           }
+        }
+        if (matchedPs.length > 0) {
+          if (roleFilter) {
+            const rm = matchedPs.find(c => c.cardRole.trim().toLowerCase() === roleFilter.toLowerCase());
+            if (rm) return markAndScroll2(rm.target, rm.text, rm.cardRole);
+          }
+          const fp = matchedPs[0];
+          return markAndScroll2(fp.target, fp.text, fp.cardRole);
         }
 
         // Variant E fallback: data-apt-card absolute-positioned cards with time in <span>
         const aptCards2 = Array.from(document.querySelectorAll('[data-apt-card]')) as HTMLElement[];
+        const matchedApt2: { target: HTMLElement; text: string; cardRole: string }[] = [];
         for (const card of aptCards2) {
           const spans2 = Array.from(card.querySelectorAll('span')) as HTMLElement[];
           for (const span of spans2) {
@@ -845,9 +952,18 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
             if (norm2 === f12 || norm2 === f24) {
               const target = findClickable(card);
               const cardRole = extractCardRole(target);
-              return markAndScroll2(target, norm2, cardRole);
+              matchedApt2.push({ target, text: norm2, cardRole });
+              break;
             }
           }
+        }
+        if (matchedApt2.length > 0) {
+          if (roleFilter) {
+            const rm = matchedApt2.find(c => c.cardRole.trim().toLowerCase() === roleFilter.toLowerCase());
+            if (rm) return markAndScroll2(rm.target, rm.text, rm.cardRole);
+          }
+          const fa = matchedApt2[0];
+          return markAndScroll2(fa.target, fa.text, fa.cardRole);
         }
 
         // Variant D fallback: flex row with two time span labels
@@ -877,6 +993,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
                   .replace(/\b0(\d)(:\d{2})/g, '$1$2');
         }
         const flexRows2 = Array.from(document.querySelectorAll('div.flex')) as HTMLElement[];
+        const matchedFlex2: { target: HTMLElement; rowRange: string; cardRole: string }[] = [];
         for (const row of flexRows2) {
           const labelCol = row.querySelector(':scope > div.flex-col.justify-between, :scope > div[class*="flex-col"][class*="justify-between"]') as HTMLElement | null;
           if (!labelCol) continue;
@@ -890,9 +1007,17 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
             const card = row.querySelector('[class*="cursor-pointer"]') as HTMLElement | null;
             if (card) {
               const cardRole = extractCardRole(card);
-              return markAndScroll2(card, rowRange, cardRole);
+              matchedFlex2.push({ target: card, rowRange, cardRole });
             }
           }
+        }
+        if (matchedFlex2.length > 0) {
+          if (roleFilter) {
+            const rm = matchedFlex2.find(c => c.cardRole.trim().toLowerCase() === roleFilter.toLowerCase());
+            if (rm) return markAndScroll2(rm.target, rm.rowRange, rm.cardRole);
+          }
+          const ff = matchedFlex2[0];
+          return markAndScroll2(ff.target, ff.rowRange, ff.cardRole);
         }
 
         // XPath fallback — EXACT normalize-space match (not contains)
@@ -940,7 +1065,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
 
         return { clicked: false, matched: '', cardRole: '' };
       },
-      { s12: start12, e12: end12, s24: start24, e24: end24, f12: full12, f24: full24, marker: MARKER }
+      { s12: start12, e12: end12, s24: start24, e24: end24, f12: full12, f24: full24, marker: MARKER, roleFilter }
     );
 
     if (!xpathResult.clicked) {
