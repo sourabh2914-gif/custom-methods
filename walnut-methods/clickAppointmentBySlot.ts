@@ -2,7 +2,7 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Click Appointment By Slot
- * description: Click the appointment card matching $[selectedslot] with optional role filter $[role] and store weekday in $[weekday] and date in $[date]
+ * description: Click the appointment card matching $[selectedslot] with optional role filter $[role] and verify details changed
  * actionType: custom_click_appointment_by_slot
  * context: web
  * needsLocator: false
