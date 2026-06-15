@@ -119,21 +119,43 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       const n = parseInt((ariaSelected.textContent ?? '').trim(), 10);
       if (!isNaN(n) && n >= 1 && n <= 31) return n;
     }
-    // Strategy 2: date button with dark/active styling (bg-black, bg-primary, text-white + rounded)
+    // Strategy 2: date button with DARK/SOLID active styling only.
+    // The selected date (e.g. 25) has a solid dark fill: bg-gray-900, bg-black, bg-primary, etc.
+    // Today's indicator (e.g. 15) typically has an outline/ring or light bg — must NOT match it.
+    // Priority pass 1: explicit dark bg class (most reliable signal)
     const allDateBtns = Array.from(document.querySelectorAll('button')) as HTMLElement[];
     for (const btn of allDateBtns) {
       const cls = btn.className || '';
       const txt = (btn.textContent ?? '').trim();
       const num = parseInt(txt, 10);
       if (isNaN(num) || num < 1 || num > 31) continue;
-      // Active date usually has a dark/coloured circular background
       if (
         cls.includes('bg-black') ||
-        cls.includes('bg-primary') ||
-        cls.includes('bg-blue') ||
         cls.includes('bg-gray-900') ||
-        (cls.includes('rounded-full') && cls.includes('text-white')) ||
-        (cls.includes('rounded-full') && cls.includes('bg-'))
+        cls.includes('bg-gray-800') ||
+        cls.includes('bg-primary') ||
+        cls.includes('bg-blue-600') ||
+        cls.includes('bg-blue-500') ||
+        cls.includes('bg-blue-700')
+      ) {
+        return num;
+      }
+    }
+    // Priority pass 2: rounded-full + text-white, but EXCLUDE bg-transparent / bg-white / bg-gray-100
+    // which are used for today's outline indicator
+    for (const btn of allDateBtns) {
+      const cls = btn.className || '';
+      const txt = (btn.textContent ?? '').trim();
+      const num = parseInt(txt, 10);
+      if (isNaN(num) || num < 1 || num > 31) continue;
+      if (
+        cls.includes('rounded-full') &&
+        cls.includes('text-white') &&
+        !cls.includes('bg-transparent') &&
+        !cls.includes('bg-white') &&
+        !cls.includes('bg-gray-100') &&
+        !cls.includes('bg-gray-50') &&
+        !cls.includes('border-')
       ) {
         return num;
       }
