@@ -100,12 +100,51 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       ` or contains(@class,'bg-white') or contains(@class,'bg-gray-50') or contains(@class,'rounded-full'))` +
     `]`;
 
-  // Current system time in minutes-since-midnight (used to skip past slots)
-  const nowMinutes = (() => {
-    const now = new Date();
-    return now.getHours() * 60 + now.getMinutes();
-  })();
+  // Current system time in minutes-since-midnight (used to skip past slots for TODAY only)
+  const nowDate = new Date();
+  const nowMinutes = nowDate.getHours() * 60 + nowDate.getMinutes();
+  const todayDay = nowDate.getDate(); // e.g. 21
   ctx.log(`Current system time: ${Math.floor(nowMinutes / 60)}:${String(nowMinutes % 60).padStart(2, '0')} (${nowMinutes} min since midnight)`);
+
+  // Detect the selected/active date from the calendar DOM.
+  // The active date button is typically highlighted (e.g. dark background, text-white, rounded-full).
+  // We read the text content of the selected date button and compare to today's date.
+  // If the selected date is NOT today, we skip the time filter entirely.
+  const selectedDay: number | null = await c.page.evaluate((): number | null => {
+    // Strategy 1: button with aria-pressed="true" or aria-selected="true"
+    const ariaSelected = document.querySelector(
+      'button[aria-pressed="true"], button[aria-selected="true"], [role="gridcell"][aria-selected="true"]'
+    ) as HTMLElement | null;
+    if (ariaSelected) {
+      const n = parseInt((ariaSelected.textContent ?? '').trim(), 10);
+      if (!isNaN(n) && n >= 1 && n <= 31) return n;
+    }
+    // Strategy 2: date button with dark/active styling (bg-black, bg-primary, text-white + rounded)
+    const allDateBtns = Array.from(document.querySelectorAll('button')) as HTMLElement[];
+    for (const btn of allDateBtns) {
+      const cls = btn.className || '';
+      const txt = (btn.textContent ?? '').trim();
+      const num = parseInt(txt, 10);
+      if (isNaN(num) || num < 1 || num > 31) continue;
+      // Active date usually has a dark/coloured circular background
+      if (
+        cls.includes('bg-black') ||
+        cls.includes('bg-primary') ||
+        cls.includes('bg-blue') ||
+        cls.includes('bg-gray-900') ||
+        (cls.includes('rounded-full') && cls.includes('text-white')) ||
+        (cls.includes('rounded-full') && cls.includes('bg-'))
+      ) {
+        return num;
+      }
+    }
+    return null;
+  });
+
+  // Determine if the selected date is today → apply time filter; otherwise skip it
+  const isToday = selectedDay !== null ? selectedDay === todayDay : true; // default to true (safe)
+  ctx.log(`Selected day in calendar: ${selectedDay ?? 'unknown'}, today: ${todayDay}, isToday: ${isToday}`);
+  if (!isToday) ctx.log('Future date selected — time filter disabled, all non-disabled slots are bookable');
 
   /**
    * Parse a slot's start time from its label and return minutes-since-midnight, or null if unparseable.
@@ -193,6 +232,7 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
    * Returns the list of slot texts (in DOM order), or empty array if tab not found / disabled.
    */
   async function collectAllFutureSlotsInSection(section: string): Promise<string[]> {
+    // Note: isToday is captured from the outer scope
     const tabXpath = findTabXpath(section);
 
     const tabState: { exists: boolean; isDisabled: boolean; isActive: boolean } =
@@ -233,7 +273,8 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       return texts;
     }, allSlotsXpath);
 
-    // Keep only future slots (start time > now)
+    // Keep only future slots (start time > now) — only when booking today
+    if (!isToday) return rawSlots; // future date — all slots are valid
     return rawSlots.filter(text => {
       const startMin = parseSlotStartMinutes(text);
       if (startMin === null) return false;
@@ -354,19 +395,21 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       continue;
     }
 
-    // Filter out slots whose start time has already passed (start time <= current system time)
-    const futureSlots = allSlots.filter(slot => {
-      const startMin = parseSlotStartMinutes(slot.text);
-      if (startMin === null) {
-        ctx.log(`Could not parse time from slot text "${slot.text}" — skipping`);
-        return false;
-      }
-      if (startMin <= nowMinutes) {
-        ctx.log(`Skipping past/current slot "${slot.text}" (start=${startMin} min, now=${nowMinutes} min)`);
-        return false;
-      }
-      return true;
-    });
+    // Filter out past slots ONLY when booking today — future dates keep all non-disabled slots
+    const futureSlots = isToday
+      ? allSlots.filter(slot => {
+          const startMin = parseSlotStartMinutes(slot.text);
+          if (startMin === null) {
+            ctx.log(`Could not parse time from slot text "${slot.text}" — skipping`);
+            return false;
+          }
+          if (startMin <= nowMinutes) {
+            ctx.log(`Skipping past/current slot "${slot.text}" (start=${startMin} min, now=${nowMinutes} min)`);
+            return false;
+          }
+          return true;
+        })
+      : allSlots; // future date — all non-disabled slots are valid
 
     if (futureSlots.length === 0) {
       ctx.log(`All available slots in "${section}" are in the past — moving to next section`);
@@ -396,5 +439,6 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
     `No bookable time slots found in Morning, Afternoon, or Evening. ` +
     `Either all slots are booked/disabled or all available slots are in the past ` +
     `(current system time: ${Math.floor(nowMinutes / 60)}:${String(nowMinutes % 60).padStart(2, '0')}).`
+    + (isToday ? '' : ' Note: a future date was detected so time filter was disabled.')
   );
 }
