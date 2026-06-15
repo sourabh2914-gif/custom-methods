@@ -111,7 +111,30 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
   // We read the text content of the selected date button and compare to today's date.
   // If the selected date is NOT today, we skip the time filter entirely.
   const selectedDay: number | null = await c.page.evaluate((): number | null => {
-    // Strategy 1: button with aria-pressed="true" or aria-selected="true"
+    // Helper: parse RGB string "rgb(R, G, B)" → { r, g, b }
+    function parseRgb(color: string): { r: number; g: number; b: number } | null {
+      const m = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+      if (!m) return null;
+      return { r: parseInt(m[1], 10), g: parseInt(m[2], 10), b: parseInt(m[3], 10) };
+    }
+    // Helper: is a color "dark" (luminance < 0.15 — solid dark fill, not white/light/transparent)
+    function isDark(color: string): boolean {
+      const rgb = parseRgb(color);
+      if (!rgb) return false;
+      // Relative luminance formula
+      const toLinear = (c: number) => { const s = c / 255; return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4); };
+      const L = 0.2126 * toLinear(rgb.r) + 0.7152 * toLinear(rgb.g) + 0.0722 * toLinear(rgb.b);
+      return L < 0.15; // dark enough to be a "selected" fill
+    }
+    // Helper: is color transparent or white/near-white (today outline indicator)
+    function isLightOrTransparent(color: string): boolean {
+      if (color === 'transparent' || color === 'rgba(0, 0, 0, 0)') return true;
+      const rgb = parseRgb(color);
+      if (!rgb) return true;
+      return rgb.r > 200 && rgb.g > 200 && rgb.b > 200;
+    }
+
+    // Strategy 1: aria-pressed="true" or aria-selected="true"
     const ariaSelected = document.querySelector(
       'button[aria-pressed="true"], button[aria-selected="true"], [role="gridcell"][aria-selected="true"]'
     ) as HTMLElement | null;
@@ -119,11 +142,10 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       const n = parseInt((ariaSelected.textContent ?? '').trim(), 10);
       if (!isNaN(n) && n >= 1 && n <= 31) return n;
     }
-    // Strategy 2: date button with DARK/SOLID active styling only.
-    // The selected date (e.g. 25) has a solid dark fill: bg-gray-900, bg-black, bg-primary, etc.
-    // Today's indicator (e.g. 15) typically has an outline/ring or light bg — must NOT match it.
-    // Priority pass 1: explicit dark bg class (most reliable signal)
+
     const allDateBtns = Array.from(document.querySelectorAll('button')) as HTMLElement[];
+
+    // Strategy 2: explicit dark Tailwind bg class (fast, covers most cases)
     for (const btn of allDateBtns) {
       const cls = btn.className || '';
       const txt = (btn.textContent ?? '').trim();
@@ -141,8 +163,20 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
         return num;
       }
     }
-    // Priority pass 2: rounded-full + text-white, but EXCLUDE bg-transparent / bg-white / bg-gray-100
-    // which are used for today's outline indicator
+
+    // Strategy 3: computed background-color is dark (catches arbitrary Tailwind values like bg-[#1a1a1a])
+    // Skip buttons whose bg is light/transparent (today outline indicator uses those)
+    for (const btn of allDateBtns) {
+      const txt = (btn.textContent ?? '').trim();
+      const num = parseInt(txt, 10);
+      if (isNaN(num) || num < 1 || num > 31) continue;
+      const bg = window.getComputedStyle(btn).backgroundColor;
+      if (!isLightOrTransparent(bg) && isDark(bg)) {
+        return num;
+      }
+    }
+
+    // Strategy 4: rounded-full + text-white, excluding light/outline today indicators
     for (const btn of allDateBtns) {
       const cls = btn.className || '';
       const txt = (btn.textContent ?? '').trim();
