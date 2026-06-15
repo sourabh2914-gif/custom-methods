@@ -526,11 +526,12 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   await c.wait(300);
 
   const clickResult: { clicked: boolean; matched: string; cardRole: string } = await c.page.evaluate(
-    ({ f12, f24, s12, e12, s24, e24, marker }: {
+    ({ f12, f24, s12, e12, s24, e24, marker, roleFilter }: {
       f12: string; f24: string;
       s12: string; e12: string;
       s24: string; e24: string;
       marker: string;
+      roleFilter: string;
     }) => {
       /**
        * Collapse all whitespace/newlines in a string and trim.
