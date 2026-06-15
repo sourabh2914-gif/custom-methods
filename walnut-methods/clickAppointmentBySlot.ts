@@ -2,7 +2,7 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Click Appointment By Slot
- * description: Click the appointment card matching $[selectedslot] with optional role filter $[role] and verify details changed
+ * description: Click the appointment card matching $[selectedslot] with optional role filter $[role] and store weekday in $[weekday] and date in $[date]
  * actionType: custom_click_appointment_by_slot
  * context: web
  * needsLocator: false
@@ -12,8 +12,12 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   // ctx.args[0] = "selectedslot" (from $[selectedslot]) — runtime variable holding slot time range
   // ctx.args[1] = "role" (from $[role]) — optional runtime variable; when set, disambiguates between
   //               multiple cards at the same slot by matching the role badge text (e.g. "Doctor", "Nurse Navigator")
+  // ctx.args[2] = "weekday" (from $[weekday]) — optional output variable name; receives the weekday text
+  //               read from the column header of the matched card (e.g. "Wed", "Thu")
+  // ctx.args[3] = "date" (from $[date]) — optional output variable name; receives the date number text
+  //               read from the column header of the matched card (e.g. "17", "18")
   //
-  // Supports SIX DOM variants (E has two sub-variants E1/E2):
+  // Supports SEVEN DOM variants (E has two sub-variants E1/E2, F is the new week-view):
   //
   // ── Variant E — Absolute-positioned appointment card (data-apt-card, 12-hour, hyphen separator) ──
   //   Card container: <div data-apt-card="1" class="absolute left-1 right-1 cursor-pointer rounded-lg
@@ -251,6 +255,8 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   const c = ctx as any;
   const slotVarName = ctx.args[0]; // e.g. "selectedslot"
   const roleVarName = ctx.args[1] as string | undefined; // e.g. "role" (optional)
+  const weekdayVarName = ctx.args[2] as string | undefined; // e.g. "weekday" (optional output)
+  const dateVarName    = ctx.args[3] as string | undefined; // e.g. "date" (optional output)
 
   // ── Step 1: Read slot value from runtime variable ──────────────────────────────────────────────
 
@@ -525,7 +531,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   // Wait for second scroll to settle and card to be fully in view
   await c.wait(300);
 
-  const clickResult: { clicked: boolean; matched: string; cardRole: string } = await c.page.evaluate(
+  const clickResult: { clicked: boolean; matched: string; cardRole: string; weekday: string; date: string } = await c.page.evaluate(
     ({ f12, f24, s12, e12, s24, e24, marker, roleFilter }: {
       f12: string; f24: string;
       s12: string; e12: string;
@@ -631,10 +637,108 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
        * scrollable container, and return. The actual click is done by Playwright after
        * the scroll completes so that pointer events fire correctly.
        */
-      function markAndScroll(target: HTMLElement, matched: string, cardRole: string): { clicked: boolean; matched: string; cardRole: string } {
+      function markAndScroll(target: HTMLElement, matched: string, cardRole: string, weekday = '', date = ''): { clicked: boolean; matched: string; cardRole: string; weekday: string; date: string } {
         target.setAttribute(marker, 'true');
         target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
-        return { clicked: true, matched, cardRole };
+        return { clicked: true, matched, cardRole, weekday, date };
+      }
+
+      /**
+       * Given an element inside a week-view column, walk up to find the column container
+       * (div.flex-1 with min-w-[140px]) and read the weekday/date from its header.
+       * Header DOM:
+       *   <div class="flex-1 rounded-t-2xl border-x border-white border-opacity-50 min-w-[140px] bg-primary-bg bg-opacity-20">
+       *     <div class="h-12 p-2 rounded-t-2xl text-center flex justify-center items-center gap-1.5 font-bold text-text-color">
+       *       <span class="text-sm font-medium">Wed</span>
+       *       <span class="text-lg">17</span>
+       *     </div>
+       *   </div>
+       */
+      function extractWeekdayDate(el: HTMLElement): { weekday: string; date: string } {
+        // Walk up to find a column div that contains a min-w-[140px] class
+        let cur: HTMLElement | null = el;
+        while (cur) {
+          if (cur.classList.contains('flex-1') && cur.className.includes('min-w-')) {
+            // Found the column container — read spans from the header child
+            const headerDiv = cur.querySelector('div[class*="h-12"]') as HTMLElement | null;
+            if (headerDiv) {
+              const spans = Array.from(headerDiv.querySelectorAll('span')) as HTMLElement[];
+              const weekday = spans[0] ? (spans[0].textContent ?? '').trim() : '';
+              const date    = spans[1] ? (spans[1].textContent ?? '').trim() : '';
+              return { weekday, date };
+            }
+            // Try direct child spans if no h-12 header found
+            const directSpans = Array.from(cur.querySelectorAll(':scope > div span')) as HTMLElement[];
+            if (directSpans.length >= 2) {
+              return { weekday: (directSpans[0].textContent ?? '').trim(), date: (directSpans[1].textContent ?? '').trim() };
+            }
+          }
+          cur = cur.parentElement;
+        }
+        return { weekday: '', date: '' };
+      }
+
+      // ── Variant F: multi-column week-view with day-header columns ───────────────────────────────
+      // Each column:
+      //   <div class="flex-1 rounded-t-2xl border-x border-white border-opacity-50 min-w-[140px] bg-primary-bg bg-opacity-20">
+      //     <div class="h-12 p-2 rounded-t-2xl text-center flex justify-center items-center gap-1.5 font-bold text-text-color">
+      //       <span class="text-sm font-medium">Wed</span>
+      //       <span class="text-lg">17</span>
+      //     </div>
+      //     ... appointment cards ...
+      //     <div class="cursor-pointer w-full h-full"> or <div data-apt-card="1" ...>
+      //       ...
+      //       <span ...>15:00 – 15:30</span>  or  <p ...>15:00 – 15:30</p>
+      //     </div>
+      //   </div>
+      //
+      // Strategy: find all week-view columns (flex-1 + min-w-[140px]), search their cards for
+      // a time match, then read the weekday/date from the column header.
+      const weekColumns = Array.from(
+        document.querySelectorAll('div.flex-1[class*="min-w-"]')
+      ) as HTMLElement[];
+      const matchedWeekColCards: { target: HTMLElement; text: string; cardRole: string; weekday: string; date: string }[] = [];
+      for (const col of weekColumns) {
+        // Read weekday + date from the column header
+        const { weekday: colWeekday, date: colDate } = extractWeekdayDate(col);
+
+        // Search <p> elements inside this column
+        const colPs = Array.from(col.querySelectorAll('p')) as HTMLElement[];
+        for (const p of colPs) {
+          const text = collapse(p.textContent ?? '');
+          if (isMatch(text)) {
+            const target = findClickable(p);
+            const cardRole = extractCardRole(target);
+            matchedWeekColCards.push({ target, text, cardRole, weekday: colWeekday, date: colDate });
+          }
+        }
+        // Search <span> elements inside this column (for data-apt-card or direct span time)
+        const colSpans = Array.from(col.querySelectorAll('span')) as HTMLElement[];
+        for (const span of colSpans) {
+          const isLeaf = span.querySelector('*') === null;
+          if (!isLeaf) continue;
+          const text = collapse(span.textContent ?? '');
+          if (isMatch(text)) {
+            const target = findClickable(span);
+            if (target !== span) {
+              const cardRole = extractCardRole(target);
+              // Avoid duplicate if already found via <p> scan
+              if (!matchedWeekColCards.some(m => m.target === target)) {
+                matchedWeekColCards.push({ target, text, cardRole, weekday: colWeekday, date: colDate });
+              }
+            }
+          }
+        }
+      }
+      if (matchedWeekColCards.length > 0) {
+        if (roleFilter) {
+          const roleMatch = matchedWeekColCards.find(
+            c => c.cardRole.trim().toLowerCase() === roleFilter.toLowerCase()
+          );
+          if (roleMatch) return markAndScroll(roleMatch.target, roleMatch.text, roleMatch.cardRole, roleMatch.weekday, roleMatch.date);
+        }
+        const first = matchedWeekColCards[0];
+        return markAndScroll(first.target, first.text, first.cardRole, first.weekday, first.date);
       }
 
       // ── Variants A/B/C: scan all <p> tags for time match ─────────────────────────────────────
@@ -853,7 +957,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         return markAndScroll(first.target, first.text, first.cardRole);
       }
 
-      return { clicked: false, matched: '', cardRole: '' };
+      return { clicked: false, matched: '', cardRole: '', weekday: '', date: '' };
     },
     { f12: full12, f24: full24, s12: start12, e12: end12, s24: start24, e24: end24, marker: MARKER, roleFilter }
   );
@@ -882,7 +986,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
     // ── XPath fallback ─────────────────────────────────────────────────────────────────────────
     ctx.log('querySelector scan found no match — trying XPath fallback...');
 
-    const xpathResult: { clicked: boolean; matched: string; cardRole: string } = await c.page.evaluate(
+    const xpathResult: { clicked: boolean; matched: string; cardRole: string; weekday: string; date: string } = await c.page.evaluate(
       ({ s12, e12, s24, e24, f12, f24, marker, roleFilter }: { s12: string; e12: string; s24: string; e24: string; f12: string; f24: string; marker: string; roleFilter: string }) => {
         function findClickable(el: HTMLElement): HTMLElement {
           let cur: HTMLElement | null = el;
@@ -909,10 +1013,10 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           return '';
         }
 
-        function markAndScroll2(target: HTMLElement, matched: string, cardRole: string): { clicked: boolean; matched: string; cardRole: string } {
+        function markAndScroll2(target: HTMLElement, matched: string, cardRole: string): { clicked: boolean; matched: string; cardRole: string; weekday: string; date: string } {
           target.setAttribute(marker, 'true');
           target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
-          return { clicked: true, matched, cardRole };
+          return { clicked: true, matched, cardRole, weekday: '', date: '' };
         }
 
         // Match the FULL range string to avoid false positives.
@@ -1064,7 +1168,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           }
         }
 
-        return { clicked: false, matched: '', cardRole: '' };
+        return { clicked: false, matched: '', cardRole: '', weekday: '', date: '' };
       },
       { s12: start12, e12: end12, s24: start24, e24: end24, f12: full12, f24: full24, marker: MARKER, roleFilter }
     );
@@ -1088,9 +1192,17 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
     }
 
     cardRole = xpathResult.cardRole;
+    // Store weekday/date from XPath fallback (empty for non-Variant-F paths)
+    if (weekdayVarName && xpathResult.weekday) ctx.setVariable(weekdayVarName, xpathResult.weekday);
+    if (dateVarName && xpathResult.date) ctx.setVariable(dateVarName, xpathResult.date);
     ctx.log(`XPath fallback clicked card — matched text: "${xpathResult.matched}", role: "${cardRole}"`);
+    if (xpathResult.weekday || xpathResult.date) ctx.log(`Column header — weekday: "${xpathResult.weekday}", date: "${xpathResult.date}"`);
   } else {
+    // Store weekday/date from primary scan (Variant F populates these)
+    if (weekdayVarName && clickResult.weekday) ctx.setVariable(weekdayVarName, clickResult.weekday);
+    if (dateVarName && clickResult.date) ctx.setVariable(dateVarName, clickResult.date);
     ctx.log(`Clicked appointment card — matched text: "${clickResult.matched}", role: "${cardRole}"`);
+    if (clickResult.weekday || clickResult.date) ctx.log(`Column header — weekday: "${clickResult.weekday}", date: "${clickResult.date}"`);
   }
 
   // ── Step 5: Poll for detail panel to show slot time AND role (confirms update) ─────────────────
