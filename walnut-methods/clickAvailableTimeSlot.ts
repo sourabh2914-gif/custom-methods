@@ -197,10 +197,12 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
     return null;
   });
 
-  // Determine if the selected date is today → apply time filter; otherwise skip it
-  const isToday = selectedDay !== null ? selectedDay === todayDay : true; // default to true (safe)
-  ctx.log(`Selected day in calendar: ${selectedDay ?? 'unknown'}, today: ${todayDay}, isToday: ${isToday}`);
-  if (!isToday) ctx.log('Future date selected — time filter disabled, all non-disabled slots are bookable');
+  // Determine if the selected date is today → apply time filter; otherwise skip it.
+  // Default to FALSE (disable time filter) when detection fails — most bookings are on future dates,
+  // so allowing all slots is safer than blocking them all with the time filter.
+  const isToday = selectedDay !== null ? selectedDay === todayDay : false;
+  ctx.log(`Selected day in calendar: ${selectedDay ?? 'undetected (defaulting to future date)'}, today: ${todayDay}, isToday: ${isToday}`);
+  if (!isToday) ctx.log('Future date selected (or date undetectable) — time filter disabled, all non-disabled slots are bookable');
 
   /**
    * Parse a slot's start time from its label and return minutes-since-midnight, or null if unparseable.
