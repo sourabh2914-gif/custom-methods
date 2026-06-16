@@ -82,6 +82,10 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
   // XPath for clickable (non-disabled) slots only — used for the click action
   // Variant C slots: bg-white (available), no disabled attr, no cursor-not-allowed
   //   <button class="relative py-1.5 px-1 ... bg-white text-[#555] hover:bg-gray-50">12:00 – 12:30</button>
+  // Excludes already-selected/booked slots:
+  //   - bg-blue-500 / bg-blue-600 / bg-blue-700 / bg-primary / bg-black / bg-[#...] dark fills = selected state
+  //   - opacity-50 / opacity-40 / line-through = visually booked/unavailable
+  //   - text-white on a colored bg = selected/active slot
   const availableSlotXpath =
     `//button[` +
       `not(@disabled)` +
@@ -89,6 +93,15 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       ` and (contains(@class,'cursor-pointer') or contains(@class,'bg-white') or contains(@class,'hover:bg-gray-50'))` +
       ` and contains(normalize-space(text()),':')` +   // time slots contain ":" e.g. "10:00 AM" or "12:00"
       ` and not(contains(@class,'flex-1'))` +          // exclude section tab buttons
+      ` and not(contains(@class,'bg-blue-500'))` +     // exclude selected slots (Variant A/B selected state)
+      ` and not(contains(@class,'bg-blue-600'))` +
+      ` and not(contains(@class,'bg-blue-700'))` +
+      ` and not(contains(@class,'bg-primary'))` +
+      ` and not(contains(@class,'bg-black'))` +
+      ` and not(contains(@class,'bg-gray-900'))` +
+      ` and not(contains(@class,'opacity-50'))` +      // exclude faded/booked slots
+      ` and not(contains(@class,'opacity-40'))` +
+      ` and not(contains(@class,'line-through'))` +    // exclude struck-through booked slots
     `]`;
 
   // XPath for ALL slots (faded/disabled included) — used for firstSlot/lastSlot capture
@@ -476,12 +489,32 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
 
     const slotResult = futureSlots[0];
 
-    // Click the slot by its snapshot index (avoids re-querying the DOM)
     ctx.log(`Found future available slot in "${section}": "${slotResult.text}" — clicking...`);
 
-    // Use the XPath with positional index to click the exact slot
-    const slotXpathIndexed = `(${availableSlotXpath})[${slotResult.index + 1}]`;
-    await c.page.locator(`xpath=${slotXpathIndexed}`).first().click();
+    // Click by normalized text match to avoid stale positional index issues.
+    // Escape any single quotes in the slot text for XPath.
+    const escapedText = slotResult.text.replace(/'/g, "', \"'\", '");
+    const slotXpathByText =
+      `//button[` +
+        `not(@disabled)` +
+        ` and not(contains(@class,'cursor-not-allowed'))` +
+        ` and not(contains(@class,'flex-1'))` +
+        ` and not(contains(@class,'bg-blue-500'))` +
+        ` and not(contains(@class,'bg-blue-600'))` +
+        ` and not(contains(@class,'bg-blue-700'))` +
+        ` and not(contains(@class,'bg-primary'))` +
+        ` and not(contains(@class,'bg-black'))` +
+        ` and not(contains(@class,'bg-gray-900'))` +
+        ` and not(contains(@class,'opacity-50'))` +
+        ` and not(contains(@class,'opacity-40'))` +
+        ` and not(contains(@class,'line-through'))` +
+        ` and normalize-space(text())='${escapedText}'` +
+      `]`;
+
+    await c.page.locator(`xpath=${slotXpathByText}`).first().click();
+
+    // Wait briefly for the app to register the click and update slot states
+    await c.wait(800);
 
     ctx.log(`Clicked time slot: "${slotResult.text}"`);
 
