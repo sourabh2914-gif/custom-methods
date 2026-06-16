@@ -10,7 +10,6 @@ import type { WalnutContext } from './walnut';
  */
 export async function getCurrentDateTimeAndStore(ctx: WalnutContext) {
   // ctx.args[0] = "currentDateTime" (from $[currentDateTime]) — runtime variable name
-  //
   // Always produces: "MM/DD/YYYY, HH:MM AM/PM"  e.g. "06/16/2026, 01:14 PM"
   // — Date part:  MM/DD/YYYY  (zero-padded month and day)
   // — Time part:  12-hour clock with AM/PM, regardless of system locale/24hr setting
