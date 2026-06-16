@@ -32,7 +32,7 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
   //       09:30 AM – 10:00 AM
   //     </button>
   //   </div>
-  //   Section tabs: <button class="flex-1 flex items-center ..."><img ...>"Evening"</button>
+  //   Section tabs: <button class="flex-1 flex items-center ..."><img ...> Evening</button>  (img + text node)
   //
   // Variant C — grid-cols-2 wrapper, 24-hour time format, bg-white for available slots:
   //   <div class="bg-[#F5F5F5] grid grid-cols-2 gap-2 p-3" style="position: relative; z-index: 1;">
@@ -71,17 +71,24 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
 
   // Tab XPath — supports all DOM variants:
   //   Variant A: <button><span>Morning</span></button>
-  //   Variant B: <button><img alt="Morning" ...>"Morning"</button>  (text node, no span)
+  //   Variant B: <button><img alt="Morning" ...>"Morning"</button>  (has <img>, text node alongside)
   //   Variant C: <button ...><span class="relative z-10">Afternoon</span><span ...>10</span></button>
+  // NOTE: Variant B uses `not(.//span)` was WRONG — Variant B may have spans too.
+  //   Instead detect Variant B by presence of <img> child alongside the label text.
   const findTabXpath = (label: string) =>
     `//button[` +
-      `.//span[normalize-space(text())='${label}']` +
-      ` or (contains(normalize-space(.),'${label}') and not(.//span))` +
+      `.//span[normalize-space(text())='${label}']` +           // Variant A & C: span contains label
+      ` or (.//img and contains(normalize-space(.),'${label}'))` + // Variant B: img sibling + text node
     `]`;
 
   // XPath for clickable (non-disabled) slots only — used for the click action
   // Variant C slots: bg-white (available), no disabled attr, no cursor-not-allowed
   //   <button class="relative py-1.5 px-1 ... bg-white text-[#555] hover:bg-gray-50">12:00 – 12:30</button>
+  // Excludes already-selected/booked slots:
+  //   - bg-blue-500 / bg-blue-600 / bg-blue-700 / bg-primary / bg-black / bg-gray-900 = selected state (A/B)
+  //   - bg-[#3279AD] / bg-[#...] arbitrary hex fills = selected state (Variant C custom color)
+  //   - opacity-50 / opacity-40 / line-through = visually booked/unavailable
+  //   - text-white on a colored bg = selected/active slot
   const availableSlotXpath =
     `//button[` +
       `not(@disabled)` +
@@ -89,6 +96,17 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       ` and (contains(@class,'cursor-pointer') or contains(@class,'bg-white') or contains(@class,'hover:bg-gray-50'))` +
       ` and contains(normalize-space(text()),':')` +   // time slots contain ":" e.g. "10:00 AM" or "12:00"
       ` and not(contains(@class,'flex-1'))` +          // exclude section tab buttons
+      ` and not(contains(@class,'bg-blue-500'))` +     // exclude selected slots (Variant A/B selected state)
+      ` and not(contains(@class,'bg-blue-600'))` +
+      ` and not(contains(@class,'bg-blue-700'))` +
+      ` and not(contains(@class,'bg-primary'))` +
+      ` and not(contains(@class,'bg-black'))` +
+      ` and not(contains(@class,'bg-gray-900'))` +
+      ` and not(contains(@class,'opacity-50'))` +      // exclude faded/booked slots
+      ` and not(contains(@class,'opacity-40'))` +
+      ` and not(contains(@class,'line-through'))` +    // exclude struck-through booked slots
+      ` and not(contains(@class,'bg-[#3279AD]'))` +    // exclude Variant C selected state (custom hex)
+      ` and not(contains(@class,'bg-[#'))` +           // exclude any arbitrary hex bg (selected/active fill)
     `]`;
 
   // XPath for ALL slots (faded/disabled included) — used for firstSlot/lastSlot capture
@@ -111,7 +129,30 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
   // We read the text content of the selected date button and compare to today's date.
   // If the selected date is NOT today, we skip the time filter entirely.
   const selectedDay: number | null = await c.page.evaluate((): number | null => {
-    // Strategy 1: button with aria-pressed="true" or aria-selected="true"
+    // Helper: parse RGB string "rgb(R, G, B)" → { r, g, b }
+    function parseRgb(color: string): { r: number; g: number; b: number } | null {
+      const m = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+      if (!m) return null;
+      return { r: parseInt(m[1], 10), g: parseInt(m[2], 10), b: parseInt(m[3], 10) };
+    }
+    // Helper: is a color "dark" (luminance < 0.15 — solid dark fill, not white/light/transparent)
+    function isDark(color: string): boolean {
+      const rgb = parseRgb(color);
+      if (!rgb) return false;
+      // Relative luminance formula
+      const toLinear = (c: number) => { const s = c / 255; return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4); };
+      const L = 0.2126 * toLinear(rgb.r) + 0.7152 * toLinear(rgb.g) + 0.0722 * toLinear(rgb.b);
+      return L < 0.15; // dark enough to be a "selected" fill
+    }
+    // Helper: is color transparent or white/near-white (today outline indicator)
+    function isLightOrTransparent(color: string): boolean {
+      if (color === 'transparent' || color === 'rgba(0, 0, 0, 0)') return true;
+      const rgb = parseRgb(color);
+      if (!rgb) return true;
+      return rgb.r > 200 && rgb.g > 200 && rgb.b > 200;
+    }
+
+    // Strategy 1: aria-pressed="true" or aria-selected="true"
     const ariaSelected = document.querySelector(
       'button[aria-pressed="true"], button[aria-selected="true"], [role="gridcell"][aria-selected="true"]'
     ) as HTMLElement | null;
@@ -119,21 +160,54 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       const n = parseInt((ariaSelected.textContent ?? '').trim(), 10);
       if (!isNaN(n) && n >= 1 && n <= 31) return n;
     }
-    // Strategy 2: date button with dark/active styling (bg-black, bg-primary, text-white + rounded)
+
     const allDateBtns = Array.from(document.querySelectorAll('button')) as HTMLElement[];
+
+    // Strategy 2: explicit dark Tailwind bg class (fast, covers most cases)
     for (const btn of allDateBtns) {
       const cls = btn.className || '';
       const txt = (btn.textContent ?? '').trim();
       const num = parseInt(txt, 10);
       if (isNaN(num) || num < 1 || num > 31) continue;
-      // Active date usually has a dark/coloured circular background
       if (
         cls.includes('bg-black') ||
-        cls.includes('bg-primary') ||
-        cls.includes('bg-blue') ||
         cls.includes('bg-gray-900') ||
-        (cls.includes('rounded-full') && cls.includes('text-white')) ||
-        (cls.includes('rounded-full') && cls.includes('bg-'))
+        cls.includes('bg-gray-800') ||
+        cls.includes('bg-primary') ||
+        cls.includes('bg-blue-600') ||
+        cls.includes('bg-blue-500') ||
+        cls.includes('bg-blue-700')
+      ) {
+        return num;
+      }
+    }
+
+    // Strategy 3: computed background-color is dark (catches arbitrary Tailwind values like bg-[#1a1a1a])
+    // Skip buttons whose bg is light/transparent (today outline indicator uses those)
+    for (const btn of allDateBtns) {
+      const txt = (btn.textContent ?? '').trim();
+      const num = parseInt(txt, 10);
+      if (isNaN(num) || num < 1 || num > 31) continue;
+      const bg = window.getComputedStyle(btn).backgroundColor;
+      if (!isLightOrTransparent(bg) && isDark(bg)) {
+        return num;
+      }
+    }
+
+    // Strategy 4: rounded-full + text-white, excluding light/outline today indicators
+    for (const btn of allDateBtns) {
+      const cls = btn.className || '';
+      const txt = (btn.textContent ?? '').trim();
+      const num = parseInt(txt, 10);
+      if (isNaN(num) || num < 1 || num > 31) continue;
+      if (
+        cls.includes('rounded-full') &&
+        cls.includes('text-white') &&
+        !cls.includes('bg-transparent') &&
+        !cls.includes('bg-white') &&
+        !cls.includes('bg-gray-100') &&
+        !cls.includes('bg-gray-50') &&
+        !cls.includes('border-')
       ) {
         return num;
       }
@@ -141,10 +215,13 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
     return null;
   });
 
-  // Determine if the selected date is today → apply time filter; otherwise skip it
-  const isToday = selectedDay !== null ? selectedDay === todayDay : true; // default to true (safe)
-  ctx.log(`Selected day in calendar: ${selectedDay ?? 'unknown'}, today: ${todayDay}, isToday: ${isToday}`);
-  if (!isToday) ctx.log('Future date selected — time filter disabled, all non-disabled slots are bookable');
+  // Determine if the selected date is today → apply time filter; otherwise skip it.
+  // Default to TRUE when detection fails — always filter by current time to avoid clicking past slots.
+  // If the selected date is a confirmed future date, all slots are valid regardless of current time.
+  const isToday = selectedDay !== null ? selectedDay === todayDay : true;
+  ctx.log(`Selected day in calendar: ${selectedDay ?? 'undetected (defaulting to today — time filter ON)'}, today: ${todayDay}, isToday: ${isToday}`);
+  if (!isToday) ctx.log('Future date confirmed — time filter disabled, all non-disabled slots are bookable');
+  else ctx.log(`Today selected — only slots with start time > ${Math.floor(nowMinutes / 60)}:${String(nowMinutes % 60).padStart(2, '0')} are eligible`);
 
   /**
    * Parse a slot's start time from its label and return minutes-since-midnight, or null if unparseable.
@@ -418,12 +495,34 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
 
     const slotResult = futureSlots[0];
 
-    // Click the slot by its snapshot index (avoids re-querying the DOM)
     ctx.log(`Found future available slot in "${section}": "${slotResult.text}" — clicking...`);
 
-    // Use the XPath with positional index to click the exact slot
-    const slotXpathIndexed = `(${availableSlotXpath})[${slotResult.index + 1}]`;
-    await c.page.locator(`xpath=${slotXpathIndexed}`).first().click();
+    // Click by normalized text match to avoid stale positional index issues.
+    // Escape any single quotes in the slot text for XPath.
+    const escapedText = slotResult.text.replace(/'/g, "', \"'\", '");
+    const slotXpathByText =
+      `//button[` +
+        `not(@disabled)` +
+        ` and not(contains(@class,'cursor-not-allowed'))` +
+        ` and not(contains(@class,'flex-1'))` +
+        ` and not(contains(@class,'bg-blue-500'))` +
+        ` and not(contains(@class,'bg-blue-600'))` +
+        ` and not(contains(@class,'bg-blue-700'))` +
+        ` and not(contains(@class,'bg-primary'))` +
+        ` and not(contains(@class,'bg-black'))` +
+        ` and not(contains(@class,'bg-gray-900'))` +
+        ` and not(contains(@class,'opacity-50'))` +
+        ` and not(contains(@class,'opacity-40'))` +
+        ` and not(contains(@class,'line-through'))` +
+        ` and not(contains(@class,'bg-[#3279AD]'))` +  // exclude Variant C selected state
+        ` and not(contains(@class,'bg-[#'))` +         // exclude any arbitrary hex bg fill
+        ` and normalize-space(text())='${escapedText}'` +
+      `]`;
+
+    await c.page.locator(`xpath=${slotXpathByText}`).first().click();
+
+    // Wait briefly for the app to register the click and update slot states
+    await c.wait(800);
 
     ctx.log(`Clicked time slot: "${slotResult.text}"`);
 
