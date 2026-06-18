@@ -247,16 +247,12 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
     return null;
   });
 
-  // Determine if the selected date is today → apply time filter; otherwise skip it.
-  // When detection fails (selectedDay === null), default to FALSE (no time filter).
-  // Rationale: tests always navigate to a specific date before this step runs; if we cannot
-  // detect which date is selected it is safer to show all slots than to wrongly filter them
-  // out with the current-time filter — the latter causes the "no slots available" false failure
-  // that occurs when a future date (e.g. 27) is selected but the detection returns null.
+  // Time filter always applies — skip slots whose start time is before current system time,
+  // regardless of whether the selected date is today or a future date.
+  // (isToday is kept for firstSlot/lastSlot logging only — it no longer gates the time filter)
   const isToday = selectedDay !== null ? selectedDay === todayDay : false;
-  ctx.log(`Selected day in calendar: ${selectedDay ?? 'undetected (defaulting to future-date — time filter OFF)'}, today: ${todayDay}, isToday: ${isToday}`);
-  if (!isToday) ctx.log('Future date confirmed (or detection fallback) — time filter disabled, all non-disabled slots are bookable');
-  else ctx.log(`Today selected — only slots with start time > ${Math.floor(nowMinutes / 60)}:${String(nowMinutes % 60).padStart(2, '0')} are eligible`);
+  ctx.log(`Selected day in calendar: ${selectedDay ?? 'undetected'}, today: ${todayDay}, isToday: ${isToday}`);
+  ctx.log(`Time filter always ON — skipping slots with start time ≤ ${Math.floor(nowMinutes / 60)}:${String(nowMinutes % 60).padStart(2, '0')} (current system time)`);
 
   /**
    * Parse a slot's start time from its label and return minutes-since-midnight, or null if unparseable.
@@ -385,8 +381,10 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       return texts;
     }, allSlotsXpath);
 
-    // Keep only future slots (start time > now) — only when booking today
-    if (!isToday) return rawSlots; // future date — all slots are valid
+    // Always filter by current system time — skip slots whose start time has already passed.
+    // This applies to ALL dates (today and future) because the app shows all slots for a given
+    // day regardless of current time, so a 9:30 AM slot on a future date is still in the past
+    // relative to 13:17 system time and must not be clicked.
     return rawSlots.filter(text => {
       const startMin = parseSlotStartMinutes(text);
       if (startMin === null) return false;
@@ -507,21 +505,20 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       continue;
     }
 
-    // Filter out past slots ONLY when booking today — future dates keep all non-disabled slots
-    const futureSlots = isToday
-      ? allSlots.filter(slot => {
-          const startMin = parseSlotStartMinutes(slot.text);
-          if (startMin === null) {
-            ctx.log(`Could not parse time from slot text "${slot.text}" — skipping`);
-            return false;
-          }
-          if (startMin <= nowMinutes) {
-            ctx.log(`Skipping past/current slot "${slot.text}" (start=${startMin} min, now=${nowMinutes} min)`);
-            return false;
-          }
-          return true;
-        })
-      : allSlots; // future date — all non-disabled slots are valid
+    // Always filter out past slots regardless of date (today or future).
+    // The app shows all slots for any given day; system time determines what's bookable.
+    const futureSlots = allSlots.filter(slot => {
+      const startMin = parseSlotStartMinutes(slot.text);
+      if (startMin === null) {
+        ctx.log(`Could not parse time from slot text "${slot.text}" — skipping`);
+        return false;
+      }
+      if (startMin <= nowMinutes) {
+        ctx.log(`Skipping past/current slot "${slot.text}" (start=${startMin} min, now=${nowMinutes} min)`);
+        return false;
+      }
+      return true;
+    });
 
     if (futureSlots.length === 0) {
       ctx.log(`All available slots in "${section}" are in the past — moving to next section`);
