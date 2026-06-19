@@ -206,22 +206,53 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
         !cls.includes('bg-transparent') &&
         !cls.includes('bg-white') &&
         !cls.includes('bg-gray-100') &&
-        !cls.includes('bg-gray-50') &&
-        !cls.includes('border-')
+        !cls.includes('bg-gray-50')
       ) {
         return num;
       }
     }
+
+    // Strategy 5: arbitrary hex bg class e.g. bg-[#1a1a1a] — Variant C selected date
+    for (const btn of allDateBtns) {
+      const cls = btn.className || '';
+      const txt = (btn.textContent ?? '').trim();
+      const num = parseInt(txt, 10);
+      if (isNaN(num) || num < 1 || num > 31) continue;
+      // Match bg-[#xxxxxx] or bg-[#xxx] patterns used by Tailwind JIT for selected date
+      if (/bg-\[#[0-9a-fA-F]{3,8}\]/.test(cls) && cls.includes('rounded')) {
+        return num;
+      }
+    }
+
+    // Strategy 6: widest computed-style sweep — any non-light/non-transparent bg,
+    // relaxed luminance threshold (< 0.40) to catch mid-dark fills like deep blue/navy/teal
+    for (const btn of allDateBtns) {
+      const txt = (btn.textContent ?? '').trim();
+      const num = parseInt(txt, 10);
+      if (isNaN(num) || num < 1 || num > 31) continue;
+      const bg = window.getComputedStyle(btn).backgroundColor;
+      if (bg === 'transparent' || bg === 'rgba(0, 0, 0, 0)') continue;
+      const rgb2 = parseRgb(bg);
+      if (!rgb2) continue;
+      // Skip clearly white/near-white
+      if (rgb2.r > 220 && rgb2.g > 220 && rgb2.b > 220) continue;
+      // Accept any non-white, non-transparent solid fill (catches dark blue, navy, teal, etc.)
+      const toLinear2 = (v: number) => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4); };
+      const L2 = 0.2126 * toLinear2(rgb2.r) + 0.7152 * toLinear2(rgb2.g) + 0.0722 * toLinear2(rgb2.b);
+      if (L2 < 0.40) {
+        return num;
+      }
+    }
+
     return null;
   });
 
-  // Determine if the selected date is today → apply time filter; otherwise skip it.
-  // Default to TRUE when detection fails — always filter by current time to avoid clicking past slots.
-  // If the selected date is a confirmed future date, all slots are valid regardless of current time.
-  const isToday = selectedDay !== null ? selectedDay === todayDay : true;
-  ctx.log(`Selected day in calendar: ${selectedDay ?? 'undetected (defaulting to today — time filter ON)'}, today: ${todayDay}, isToday: ${isToday}`);
-  if (!isToday) ctx.log('Future date confirmed — time filter disabled, all non-disabled slots are bookable');
-  else ctx.log(`Today selected — only slots with start time > ${Math.floor(nowMinutes / 60)}:${String(nowMinutes % 60).padStart(2, '0')} are eligible`);
+  // Time filter always applies — skip slots whose start time is before current system time,
+  // regardless of whether the selected date is today or a future date.
+  // (isToday is kept for firstSlot/lastSlot logging only — it no longer gates the time filter)
+  const isToday = selectedDay !== null ? selectedDay === todayDay : false;
+  ctx.log(`Selected day in calendar: ${selectedDay ?? 'undetected'}, today: ${todayDay}, isToday: ${isToday}`);
+  ctx.log(`Time filter always ON — skipping slots with start time ≤ ${Math.floor(nowMinutes / 60)}:${String(nowMinutes % 60).padStart(2, '0')} (current system time)`);
 
   /**
    * Parse a slot's start time from its label and return minutes-since-midnight, or null if unparseable.
@@ -350,8 +381,10 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       return texts;
     }, allSlotsXpath);
 
-    // Keep only future slots (start time > now) — only when booking today
-    if (!isToday) return rawSlots; // future date — all slots are valid
+    // Always filter by current system time — skip slots whose start time has already passed.
+    // This applies to ALL dates (today and future) because the app shows all slots for a given
+    // day regardless of current time, so a 9:30 AM slot on a future date is still in the past
+    // relative to 13:17 system time and must not be clicked.
     return rawSlots.filter(text => {
       const startMin = parseSlotStartMinutes(text);
       if (startMin === null) return false;
@@ -472,21 +505,20 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       continue;
     }
 
-    // Filter out past slots ONLY when booking today — future dates keep all non-disabled slots
-    const futureSlots = isToday
-      ? allSlots.filter(slot => {
-          const startMin = parseSlotStartMinutes(slot.text);
-          if (startMin === null) {
-            ctx.log(`Could not parse time from slot text "${slot.text}" — skipping`);
-            return false;
-          }
-          if (startMin <= nowMinutes) {
-            ctx.log(`Skipping past/current slot "${slot.text}" (start=${startMin} min, now=${nowMinutes} min)`);
-            return false;
-          }
-          return true;
-        })
-      : allSlots; // future date — all non-disabled slots are valid
+    // Always filter out past slots regardless of date (today or future).
+    // The app shows all slots for any given day; system time determines what's bookable.
+    const futureSlots = allSlots.filter(slot => {
+      const startMin = parseSlotStartMinutes(slot.text);
+      if (startMin === null) {
+        ctx.log(`Could not parse time from slot text "${slot.text}" — skipping`);
+        return false;
+      }
+      if (startMin <= nowMinutes) {
+        ctx.log(`Skipping past/current slot "${slot.text}" (start=${startMin} min, now=${nowMinutes} min)`);
+        return false;
+      }
+      return true;
+    });
 
     if (futureSlots.length === 0) {
       ctx.log(`All available slots in "${section}" are in the past — moving to next section`);
