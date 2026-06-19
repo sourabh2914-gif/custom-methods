@@ -2,7 +2,7 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Add/Delete Comment and Verify Count
- * description: Add comment ${commentText} in ${commentInputSelector} or delete using ${deleteSelector} with count in ${commentCountSelector} and store before count in $[beforeCommentCount] and after count in $[afterCommentCount]
+ * description: Verify comment ${action} on count shown in ${commentCountSelector} and store before count in $[beforeCommentCount] and after count in $[afterCommentCount]
  * actionType: custom_add_comment_and_verify_count
  * context: web
  * needsLocator: false
@@ -10,54 +10,43 @@ import type { WalnutContext } from './walnut';
  */
 export async function addCommentAndVerifyCount(ctx: WalnutContext) {
   // ctx.args layout:
-  //   args[0] — commentText          : Comment text to type. Pass "NA" when deleting.
-  //   args[1] — commentInputSelector : XPath of the "Add a comment..." input field. Pass "NA" when deleting.
-  //   args[2] — deleteSelector       : XPath of the delete (trash) icon/button. Pass "NA" when adding.
-  //   args[3] — commentCountSelector : XPath of the element showing the comment count (e.g. the span showing "1").
-  //   args[4] — "beforeCommentCount" : output variable name (from $[beforeCommentCount]) — count BEFORE action
-  //   args[5] — "afterCommentCount"  : output variable name (from $[afterCommentCount])  — count AFTER action
+  //   args[0] — action               : "add" → expects count +1 | "delete" → expects count -1
+  //   args[1] — commentCountSelector : XPath of the element showing the comment count number
+  //   args[2] — "beforeCommentCount" : output variable name (from $[beforeCommentCount]) — count BEFORE action
+  //   args[3] — "afterCommentCount"  : output variable name (from $[afterCommentCount])  — count AFTER action
   //
-  // ADD  → pass commentText + commentInputSelector, set deleteSelector = "NA"
-  //         types the comment and presses Enter → count must increase by +1
-  // DELETE → pass deleteSelector, set commentText = "NA" and commentInputSelector = "NA"
-  //           clicks the delete button → count must decrease by -1
+  // How it works (same pattern as like/dislike):
+  //   1. Reads the count BEFORE the action → stores in $[beforeCommentCount]
+  //   2. Waits up to 5s for the count to change (user performs add/delete in a prior/parallel step)
+  //   3. Reads the count AFTER → stores in $[afterCommentCount]
+  //   4. Verifies count changed by exactly +1 (add) or -1 (delete)
+  //
+  // The user performs the actual add/delete action via normal Walnut steps BEFORE this step.
+  // This method only tracks and verifies the count change.
   //
   // Example test data for ADD:
-  //   {
-  //     "commentText": "Great article!",
-  //     "commentInputSelector": "//input[@placeholder='Add a comment...']",
-  //     "deleteSelector": "NA",
-  //     "commentCountSelector": "//span[@class='text-sm text-text-gray']"
-  //   }
+  //   { "action": "add", "commentCountSelector": "//span[@class='text-sm text-text-gray'][2]" }
+  //   → verifies count increased by 1, stores beforeCommentCount and afterCommentCount
   //
   // Example test data for DELETE:
-  //   {
-  //     "commentText": "NA",
-  //     "commentInputSelector": "NA",
-  //     "deleteSelector": "(//button[.//*[contains(@class,'lucide-trash')]])[1]",
-  //     "commentCountSelector": "//span[@class='text-sm text-text-gray']"
-  //   }
+  //   { "action": "delete", "commentCountSelector": "//span[@class='text-sm text-text-gray'][2]" }
+  //   → verifies count decreased by 1, stores beforeCommentCount and afterCommentCount
 
   const c = ctx as any;
 
-  const commentText:          string = (c.args?.[0] ?? '').trim();
-  const commentInputSelector: string = (c.args?.[1] ?? '').trim();
-  const deleteSelector:       string = (c.args?.[2] ?? '').trim();
-  const commentCountSelector: string = (c.args?.[3] ?? '').trim();
-  const beforeVar:            string = c.args?.[4]; // $[beforeCommentCount]
-  const afterVar:             string = c.args?.[5]; // $[afterCommentCount]
+  const action:               string = (c.args?.[0] ?? '').toLowerCase().trim();
+  const commentCountSelector: string = (c.args?.[1] ?? '').trim();
+  const beforeVar:            string = c.args?.[2]; // $[beforeCommentCount]
+  const afterVar:             string = c.args?.[3]; // $[afterCommentCount]
 
-  const isAdd    = commentText.toUpperCase() !== 'NA' && commentInputSelector.toUpperCase() !== 'NA';
-  const isDelete = deleteSelector.toUpperCase() !== 'NA';
-
-  if (!isAdd && !isDelete)
-    throw new Error('Provide commentText + commentInputSelector to add, or deleteSelector to delete.');
+  if (action !== 'add' && action !== 'delete')
+    throw new Error('action (args[0]) must be "add" or "delete".');
   if (!commentCountSelector)
-    throw new Error('commentCountSelector (args[3]) is required.');
+    throw new Error('commentCountSelector (args[1]) is required.');
   if (!beforeVar)
-    throw new Error('output variable $[beforeCommentCount] (args[4]) is required.');
+    throw new Error('output variable $[beforeCommentCount] (args[2]) is required.');
   if (!afterVar)
-    throw new Error('output variable $[afterCommentCount] (args[5]) is required.');
+    throw new Error('output variable $[afterCommentCount] (args[3]) is required.');
 
   // Helper: read the first integer from the comment count element
   const readCount = async (): Promise<number> => {
@@ -82,28 +71,13 @@ export async function addCommentAndVerifyCount(ctx: WalnutContext) {
     return parseInt(match[0], 10);
   };
 
-  const action = isAdd ? 'add' : 'delete';
-
   // 1. Read count BEFORE action
   const countBefore = await readCount();
   c.log(`Comment count BEFORE ${action}: ${countBefore}`);
   c.setVariable(beforeVar, String(countBefore));
   c.log(`Stored before count "${countBefore}" → $[${beforeVar}]`);
 
-  if (isAdd) {
-    // 2a. Type comment and press Enter
-    await c.click(commentInputSelector);
-    await c.type(commentInputSelector, commentText);
-    c.log(`Typed comment: "${commentText}"`);
-    await c.pressKey('Enter');
-    c.log('Submitted comment by pressing Enter');
-  } else {
-    // 2b. Click delete button
-    await c.click(deleteSelector);
-    c.log(`Clicked delete button: "${deleteSelector}"`);
-  }
-
-  // 3. Poll up to 5s for count to change
+  // 2. Poll up to 5s for the count to change
   const maxWaitMs = 5000;
   const pollMs    = 300;
   const start     = Date.now();
@@ -115,12 +89,12 @@ export async function addCommentAndVerifyCount(ctx: WalnutContext) {
     if (countAfter !== countBefore) break;
   }
 
-  // 4. Verify count changed by exactly ±1
+  // 3. Verify count changed by exactly ±1
   const delta = countAfter - countBefore;
 
-  if (isAdd) {
+  if (action === 'add') {
     if (delta === 1) {
-      c.log(`Comment count INCREASED: ${countBefore} → ${countAfter} (added)`);
+      c.log(`Comment count INCREASED: ${countBefore} → ${countAfter} (comment added)`);
     } else if (delta === 0) {
       throw new Error(`Comment count did not increase after adding. Stayed at ${countBefore}.`);
     } else {
@@ -128,7 +102,7 @@ export async function addCommentAndVerifyCount(ctx: WalnutContext) {
     }
   } else {
     if (delta === -1) {
-      c.log(`Comment count DECREASED: ${countBefore} → ${countAfter} (deleted)`);
+      c.log(`Comment count DECREASED: ${countBefore} → ${countAfter} (comment deleted)`);
     } else if (delta === 0) {
       throw new Error(`Comment count did not decrease after deleting. Stayed at ${countBefore}.`);
     } else {
@@ -136,7 +110,7 @@ export async function addCommentAndVerifyCount(ctx: WalnutContext) {
     }
   }
 
-  // 5. Store count AFTER action
+  // 4. Store count AFTER action
   c.setVariable(afterVar, String(countAfter));
   c.log(`Stored after count "${countAfter}" → $[${afterVar}]`);
 }
