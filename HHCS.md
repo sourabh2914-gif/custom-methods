@@ -13,28 +13,30 @@
 
 # Project Overview
 
-HHCS is a single-repo project consisting of one TypeScript library — `custom-methods` — that provides reusable browser-automation helper methods for the Walnut test automation framework. No description was provided for the project at the top level, so the purpose is inferred entirely from the code.
+HHCS is a test automation support project consisting of a single TypeScript library, `custom-methods`, that provides reusable browser interaction helpers for a web application in the healthcare or appointment-scheduling domain. The project does not include an application server, frontend, or database layer — it is purely a utility library intended to be consumed by a larger automation framework called Walnut.
 
-The `custom-methods` repo contains 31 TypeScript source files, each exporting one async function with the signature `async function <name>(ctx: WalnutContext)`. The library depends on `@playwright/mcp` (Playwright Model Context Protocol) and wraps Playwright browser-automation primitives behind the `WalnutContext` abstraction. There is no web server, CLI, or standalone application entry point.
+The sole repo, `custom-methods`, contains 47 TypeScript source files organized under the `walnut-methods/` directory. Each file exports a single async function accepting a `WalnutContext` object, following a plugin-style pattern compatible with the Walnut browser automation framework. The library is built on top of `@playwright/mcp` (Playwright's Model Context Protocol integration), which is its only declared external dependency.
 
-The primary tech stack is TypeScript with `@playwright/mcp` as the sole runtime dependency. No external HTTP services, databases, or third-party integrations are present in the codebase.
+Because only one repo is connected to this project, the full system under test — the actual healthcare web application — is not represented here. This repo documents only the QA automation helper layer. The primary tech stack is TypeScript compiled to CommonJS, with no test runner configured and no HTTP services exposed.
 
 ## System Architecture
 
 # System Architecture
 
-This is a single-repo project — update once more repos complete.
+This is a single-repo project — update once more repos are connected to reflect the broader HHCS system.
 
-- **`custom-methods`** (role: shared library): A TypeScript utility library consumed by the Walnut test automation runtime. It is not a standalone service; it exports 31 async functions under `walnut-methods/`, each accepting a `WalnutContext` object provided by the host Walnut framework. The library has no HTTP server, no CLI entry point, and no build script defined in `package.json` — it appears to be consumed directly as source or compiled by the host environment. The sole runtime dependency is `@playwright/mcp`, which provides the Playwright Model Context Protocol layer that the helper methods wrap.
+- **custom-methods** (role: shared library / automation plugin layer): A TypeScript CommonJS library of 47 self-contained async action modules, each accepting a `WalnutContext` object. It has no HTTP server, no entry-point application, and no inter-repo API calls visible from static analysis. It is designed to be imported by a Walnut-based test automation harness (not included in this project) that orchestrates end-to-end browser test scenarios. The sole external dependency is `@playwright/mcp`, indicating the library delegates actual browser control to Playwright via the MCP integration layer.
+
+No inter-repo connections, shared type packages, or API consumption patterns are present because only one repo exists in this project at this time.
 
 ## Domain
 
 # Domain
 Inferred from code only — may be inaccurate for early-stage or generic projects.
 
-HHCS, as represented by the single `custom-methods` repo, is a generic UI test-automation toolkit. It provides named, reusable steps that QA automation engineers can invoke inside Walnut-based test suites without writing low-level Playwright code directly. The methods span the full lifecycle of a browser-based test: reading values from UI elements (dropdowns, date-of-birth fields, generic inputs), interacting with the page (XPath-based clicks, scrolling to elements, browser refresh), handling OTP flows (`enterOtpFields`, `readOtpFromText`), managing file transfers (`clickAndCaptureDownload`, `uploadDownloadedFile`, `uploadLatestDownloadedFile`), generating random test data (alphabetic, alphanumeric, numeric, and location values), and asserting UI state (date validation, dropdown value checks, partial text matching, element-absence checks).
+The HHCS project appears to be a QA automation library targeting a healthcare web application that handles patient appointment scheduling, patient data management, and OTP-based authentication. Function names within the `custom-methods` repo — such as `captureDobFromUi`, `clickAvailableTimeSlotPatient`, `clickAppointmentBySlot`, `navigateToBookedDateInMonthView`, `verifyAppointmentInDayView`, `enterOtpFields`, and `readOtpFromText` — point to a system under test that supports booking workflows, calendar views (day, week, month), patient record entry, and secure login flows.
 
-The library does not model a specific business domain such as e-commerce or healthcare — it is a horizontal automation utility layer. Its intended consumers are QA engineers building test suites on top of the Walnut framework.
+Additional helpers such as `clickAndCaptureDownload`, `uploadDownloadedFile`, and `uploadLatestDownloadedFile` suggest the application also handles document upload and download, possibly for clinical records or appointment confirmations. The intended consumers of this library are QA engineers writing end-to-end test scenarios against the HHCS web application using the Walnut automation framework.
 
 ## Metadata
 
@@ -42,12 +44,12 @@ The library does not model a specific business domain such as e-commerce or heal
 {
   "project_id": "69cd2134b17f9683e2d30fc0",
   "project_name": "HHCS",
-  "generated_at": "2026-06-01T06:43:41Z",
+  "generated_at": "2026-06-18T06:44:20Z",
   "llm_model": "claude-sonnet-4-6",
   "total_repos": 1,
-  "total_loc": 1644,
+  "total_loc": 6104,
   "language_distribution": {
-    "custom-methods": 1644
+    "custom-methods": 6104
   },
   "primary_languages": [
     "TypeScript"
@@ -56,15 +58,15 @@ The library does not model a specific business domain such as e-commerce or heal
   "all_external_integrations": [],
   "repos": [
     {
-      "repo_id": "github_sourabh2914-gif/custom-methods_1776419624378_ftpcafw3x",
+      "repo_id": "github_sourabh2914-gif/custom-methods_1781762965760_aznwk6dua",
       "repo_name": "custom-methods",
       "primary_language": "TypeScript",
-      "architecture_md": "# Architecture\n\nThis project is a TypeScript library of custom browser-automation helper methods, designed to be consumed by a test automation framework called \"Walnut.\" Every exported function follows the same signature — `async function \u003cname\u003e(ctx: WalnutContext)` — indicating that the library is not a standalone application but a collection of reusable utilities that plug into a host context object provided by the Walnut runtime.\n\nThe sole runtime dependency is `@playwright/mcp` (version `^0.0.70`), which is the Playwright Model Context Protocol package. This strongly suggests the library wraps Playwright browser-automation primitives and exposes them through the `WalnutContext` abstraction. No web framework, CLI entry point, or HTTP server is present; `package.json` lists `index.js` as `main` but no build script is defined, so the project appears to be consumed directly as source or compiled externally.\n\nAll 31 TypeScript source files live under the single `walnut-methods/` directory, each file containing exactly one exported async function. The flat, one-file-per-method layout makes it straightforward to add or remove individual capabilities without touching shared infrastructure. There is no test runner configured (`scripts.test` is a placeholder), so testing appears to be handled by the consuming Walnut environment rather than within this repo.\n",
-      "domain_md": "# Domain\nInferred from code only — may be inaccurate for early-stage or generic projects.\n\nThis project appears to be a utility library for UI test automation, likely used by QA engineers or automated testing pipelines. The methods cover the full lifecycle of browser-based test steps: capturing values from UI elements (date-of-birth fields, dropdowns, generic fields), interacting with the page (clicking by XPath, scrolling until an element is visible, refreshing the browser), handling OTP flows (`enterOtpFields`, `readOtpFromText`), managing file downloads and uploads (`clickAndCaptureDownload`, `uploadDownloadedFile`, `uploadLatestDownloadedFile`), generating random test data (alphabets, alphanumeric strings, numeric values, locations), and asserting UI state (validating dates, dropdown values, partial text, element absence).\n\nThe library does not model a specific business domain — it is a generic toolkit of reusable automation steps. Its likely users are QA automation engineers who build test suites on top of the Walnut framework and need pre-built, named steps they can invoke without writing low-level Playwright code each time.\n",
+      "architecture_md": "# Architecture\n\nThis project is a TypeScript library of custom automation helper methods, designed to be consumed by a browser automation framework called \"Walnut\". There is no application entry point, no HTTP server, and no framework in the traditional sense — the `package.json` lists `@playwright/mcp` as its sole dependency, which suggests the methods are built on top of Playwright's Model Context Protocol (MCP) integration. No frameworks were detected with confidence beyond this dependency.\n\nAll 47 TypeScript source files live under a single top-level directory, `walnut-methods/`. Each file exports one async function that accepts a `WalnutContext` object — a pattern consistent with a plugin or extension library where each file is a self-contained, registerable action. The `package.json` points to `index.js` as the main entry, but no index file appears in the analyzed entities, so the registration/export mechanism is not fully visible from static analysis alone.\n\nThe project is compiled as CommonJS (`\"type\": \"commonjs\"`) and has no configured test runner. It appears to be a utility library intended to be imported by a larger Walnut-based test automation setup rather than run standalone.\n",
+      "domain_md": "# Domain\nInferred from code only — may be inaccurate for early-stage or generic projects.\n\nThis project appears to be a library of reusable UI automation helpers targeting a healthcare or appointment-scheduling application. The function names strongly suggest the system under test involves patient records (e.g., `captureDobFromUi`, `clickAvailableTimeSlotPatient`), appointment booking workflows (`clickAppointmentBySlot`, `navigateToBookedDateInMonthView`, `verifyAppointmentInDayView`, `verifyAppointmentInWeekView`), and OTP-based authentication (`enterOtpFields`, `readOtpFromText`).\n\nThe likely users of this library are QA engineers or automation developers writing end-to-end test scenarios against a web application that handles scheduling, patient data entry, and possibly document management (evidenced by `clickAndCaptureDownload`, `uploadDownloadedFile`, `uploadLatestDownloadedFile`). The library abstracts common, repetitive browser interactions — date picking, dropdown selection, text capture, scrolling, and element validation — into named, reusable `WalnutContext`-aware actions.\n",
       "top_level_dirs": [
         "walnut-methods"
       ],
-      "total_loc": 1644
+      "total_loc": 6104
     }
   ]
 }

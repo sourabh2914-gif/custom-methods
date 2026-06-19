@@ -494,9 +494,9 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   // Wait for first scroll to settle
   await c.wait(500);
 
-  // ── Second-pass scroll: find the actual card span and ensure it's in view ───────────────────
-  // The pre-scroll gets us to the right time region, but the card may still be just off-screen.
-  // Now that the DOM is populated, find the card's time span and scroll it into view directly.
+  // ── Second-pass scroll: modal-aware scroll to bring the target card into view ──────────────
+  // scrollIntoView() on an element inside a modal's overflow:scroll container scrolls the PAGE,
+  // not the modal. We must find the modal's own scrollable ancestor and set scrollTop directly.
   await c.page.evaluate(({ f12, f24 }: { f12: string; f24: string }) => {
     function collapse(t: string) { return t.replace(/\s+/g, ' ').trim(); }
     function normR(range: string): string {
@@ -509,7 +509,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
       }).join(' \u2013 ');
     }
     function isM(text: string): boolean {
-      if (text.length > 30) return false;
+      if (text.length > 35) return false;
       const norm = text.replace(/\s*[-\u2013\u2014]\s*/g, ' \u2013 ');
       if (norm === f12 || norm === f24) return true;
       const stripped = norm.replace(/\b0(\d)(:\d{2})/g, '$1$2');
@@ -517,19 +517,47 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
       if (normR(text) === normR(f12) || normR(text) === normR(f24)) return true;
       return false;
     }
-    // Find the first matching span/p and scroll it into view
-    const candidates = Array.from(document.querySelectorAll('span, p')) as HTMLElement[];
-    for (const el of candidates) {
-      const text = collapse(el.textContent ?? '');
-      if (isM(text)) {
-        el.scrollIntoView({ behavior: 'instant', block: 'center' });
-        return;
+
+    /** Walk up from el to find the nearest overflow:scroll/auto ancestor */
+    function findScrollParent(el: HTMLElement): HTMLElement | null {
+      let cur = el.parentElement;
+      while (cur && cur !== document.body) {
+        const ov = window.getComputedStyle(cur).overflowY;
+        if ((ov === 'scroll' || ov === 'auto') && cur.scrollHeight > cur.clientHeight) return cur;
+        cur = cur.parentElement;
       }
+      return null;
+    }
+
+    // Find the first matching span/p — prefer data-apt-card spans first
+    let targetEl: HTMLElement | null = null;
+    for (const card of Array.from(document.querySelectorAll('[data-apt-card]')) as HTMLElement[]) {
+      for (const span of Array.from(card.querySelectorAll('span')) as HTMLElement[]) {
+        if (isM(collapse(span.textContent ?? ''))) { targetEl = span; break; }
+      }
+      if (targetEl) break;
+    }
+    if (!targetEl) {
+      for (const el of Array.from(document.querySelectorAll('span, p')) as HTMLElement[]) {
+        if (isM(collapse(el.textContent ?? ''))) { targetEl = el; break; }
+      }
+    }
+    if (!targetEl) return;
+
+    const scrollParent = findScrollParent(targetEl);
+    if (scrollParent) {
+      // Scroll the modal container so the card is centred in it
+      const pRect = scrollParent.getBoundingClientRect();
+      const eRect = targetEl.getBoundingClientRect();
+      const elRelTop = eRect.top - pRect.top + scrollParent.scrollTop;
+      scrollParent.scrollTop = Math.max(0, elRelTop - scrollParent.clientHeight / 2 + eRect.height / 2);
+    } else {
+      targetEl.scrollIntoView({ behavior: 'instant', block: 'center' });
     }
   }, { f12: full12, f24: full24 });
 
-  // Wait for second scroll to settle and card to be fully in view
-  await c.wait(300);
+  // Wait for modal scroll to settle before running the querySelector scan
+  await c.wait(400);
 
   const clickResult: { clicked: boolean; matched: string; cardRole: string; weekday: string; date: string } = await c.page.evaluate(
     ({ f12, f24, s12, e12, s24, e24, marker, roleFilter }: {
@@ -639,7 +667,23 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
        */
       function markAndScroll(target: HTMLElement, matched: string, cardRole: string, weekday = '', date = ''): { clicked: boolean; matched: string; cardRole: string; weekday: string; date: string } {
         target.setAttribute(marker, 'true');
-        target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+        // Scroll via the nearest overflow:scroll ancestor (handles modal containers).
+        // scrollIntoView() on elements inside overflow:scroll modals scrolls the page, not the modal.
+        let scrolled = false;
+        let cur = target.parentElement;
+        while (cur && cur !== document.body) {
+          const ov = window.getComputedStyle(cur).overflowY;
+          if ((ov === 'scroll' || ov === 'auto') && cur.scrollHeight > cur.clientHeight) {
+            const pRect = cur.getBoundingClientRect();
+            const tRect = target.getBoundingClientRect();
+            const elRelTop = tRect.top - pRect.top + cur.scrollTop;
+            cur.scrollTop = Math.max(0, elRelTop - cur.clientHeight / 2 + tRect.height / 2);
+            scrolled = true;
+            break;
+          }
+          cur = cur.parentElement;
+        }
+        if (!scrolled) target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
         return { clicked: true, matched, cardRole, weekday, date };
       }
 
