@@ -1,14 +1,14 @@
 import type { WalnutContext } from './walnut';
 
 /** @walnut_method
- * name: Click Like and Verify Count
+ * name: Click Like/Dislike and Verify Count
  * description: Click like or unlike on ${likeSelector} and store before count in $[beforeLikeCount] and after count in $[afterLikeCount]
- * actionType: custom_click_like_and_verify_count
+ * actionType: custom_click_like_dislike_and_verify_count
  * context: web
  * needsLocator: false
  * category: Interaction
  */
-export async function clickLikeAndVerifyCount(ctx: WalnutContext) {
+export async function clickLikeDislikeAndVerifyCount(ctx: WalnutContext) {
   // ctx.args layout:
   //   args[0] — likeSelector      : XPath of the like/unlike container (the clickable div that also
   //                                  contains the count — e.g. the div wrapping the thumbs-up SVG and span)
