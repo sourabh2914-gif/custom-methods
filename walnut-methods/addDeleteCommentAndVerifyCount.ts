@@ -3,12 +3,12 @@ import type { WalnutContext } from './walnut';
 /** @walnut_method
  * name: Add/Delete Comment and Verify Count
  * description: Verify comment count change on ${commentCountSelector} and store before count in $[beforeCommentCount] and after count in $[afterCommentCount]
- * actionType: custom_add_comment_and_verify_count
+ * actionType: custom_add_delete_comment_and_verify_count
  * context: web
  * needsLocator: false
  * category: Interaction
  */
-export async function addCommentAndVerifyCount(ctx: WalnutContext) {
+export async function addDeleteCommentAndVerifyCount(ctx: WalnutContext) {
   // ctx.args layout:
   //   args[0] — commentCountSelector : XPath of the element showing the comment count number
   //   args[1] — "beforeCommentCount" : output variable name (from $[beforeCommentCount]) — count BEFORE action
