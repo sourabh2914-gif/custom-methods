@@ -2,7 +2,7 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Add/Delete Comment and Verify Count
- * description: Verify comment count change on ${commentCountSelector} and store before count in $[beforeCommentCount] and after count in $[afterCommentCount]
+ * description: Verify comment count change on ${countSpanSelector} and ${headingSelector} and store before count in $[beforeCommentCount] and after count in $[afterCommentCount]
  * actionType: custom_add_delete_comment_and_verify_count
  * context: web
  * needsLocator: false
@@ -10,95 +10,136 @@ import type { WalnutContext } from './walnut';
  */
 export async function addDeleteCommentAndVerifyCount(ctx: WalnutContext) {
   // ctx.args layout:
-  //   args[0] — commentCountSelector : XPath of the element showing the comment count number
-  //   args[1] — "beforeCommentCount" : output variable name (from $[beforeCommentCount]) — count BEFORE action
-  //   args[2] — "afterCommentCount"  : output variable name (from $[afterCommentCount])  — count AFTER action
+  //   args[0] — countSpanSelector  : XPath/CSS for the numeric span in the blog header bar
+  //                                   → shows "1", "2", etc.  May be absent/hidden at 0 comments
+  //                                   e.g. "//span[@class='text-sm text-text-gray'][2]"
+  //   args[1] — headingSelector    : XPath/CSS for the h2 heading inside the blog detail section
+  //                                   → "Comments" when 0 comments, "1 Comments" after first comment
+  //                                   e.g. "//h2[contains(@class,'text-lg') and contains(@class,'font-semibold') and contains(@class,'text-gray-900')]"
+  //   args[2] — "beforeCommentCount" : output variable (from $[beforeCommentCount])
+  //   args[3] — "afterCommentCount"  : output variable (from $[afterCommentCount])
   //
-  // How it works (same pattern as like/dislike):
-  //   1. Reads the count BEFORE → stores in $[beforeCommentCount]
-  //   2. Waits up to 5s for the count to change (you add or delete the comment via normal steps)
-  //   3. Reads the count AFTER → stores in $[afterCommentCount]
-  //   4. Auto-detects direction:
-  //        count +1 → comment was added   ✓
-  //        count -1 → comment was deleted ✓
-  //        no change → step fails
+  // Handles the "first comment" edge case:
+  //   - countSpan may not exist / be hidden at 0 comments → treated as 0
+  //   - headingSelector text = "Comments" (no number)     → treated as 0
+  //   - After adding first comment: span shows "1", heading shows "1 Comments"
   //
   // Example test data:
-  //   { "commentCountSelector": "//span[@class='text-sm text-text-gray'][2]" }
+  // {
+  //   "countSpanSelector": "//span[@class='text-sm text-text-gray'][2]",
+  //   "headingSelector":   "//h2[contains(@class,'text-lg') and contains(@class,'font-semibold') and contains(@class,'text-gray-900')]"
+  // }
 
   const c = ctx as any;
 
-  const commentCountSelector: string = (c.args?.[0] ?? '').trim();
-  const beforeVar:            string = c.args?.[1]; // $[beforeCommentCount]
-  const afterVar:             string = c.args?.[2]; // $[afterCommentCount]
+  const countSpanSelector: string = (c.args?.[0] ?? '').trim();
+  const headingSelector:   string = (c.args?.[1] ?? '').trim();
+  const beforeVar:         string = c.args?.[2];
+  const afterVar:          string = c.args?.[3];
 
-  if (!commentCountSelector)
-    throw new Error('commentCountSelector (args[0]) is required.');
+  if (!countSpanSelector)
+    throw new Error('countSpanSelector (args[0]) is required — the numeric span next to the comment icon.');
+  if (!headingSelector)
+    throw new Error('headingSelector (args[1]) is required — the h2 heading in the comments section.');
   if (!beforeVar)
-    throw new Error('output variable $[beforeCommentCount] (args[1]) is required.');
+    throw new Error('output variable $[beforeCommentCount] (args[2]) is required.');
   if (!afterVar)
-    throw new Error('output variable $[afterCommentCount] (args[2]) is required.');
+    throw new Error('output variable $[afterCommentCount] (args[3]) is required.');
 
-  // Helper: read the first integer from the comment count element
-  const readCount = async (): Promise<number> => {
+  // ── Helper: read the numeric span count ───────────────────────────────────
+  // Returns 0 if the element is absent, hidden, or has no numeric text.
+  // (At 0 comments the span may not be rendered at all.)
+  const readSpanCount = async (): Promise<number> => {
     let raw = '';
-    try {
-      raw = (await c.getText(commentCountSelector) ?? '').trim();
-    } catch (_) {}
-
-    // Try child span if container text is empty or non-numeric
-    if (!raw || !/\d/.test(raw)) {
-      try {
-        raw = (await c.getText('(' + commentCountSelector + ')//span') ?? '').trim();
-      } catch (_) {}
-    }
-
+    try { raw = (await c.getText(countSpanSelector) ?? '').trim(); } catch (_) {}
+    if (!raw) return 0;                     // absent / hidden / empty → 0 comments
     const match = raw.match(/\d+/);
-    if (!match) {
-      throw new Error(
-        `Could not find a number in the comment count element. Selector: "${commentCountSelector}". Got: "${raw}"`
-      );
-    }
-    return parseInt(match[0], 10);
+    return match ? parseInt(match[0], 10) : 0;
   };
 
-  // 1. Read count BEFORE action
-  const countBefore = await readCount();
-  c.log(`Comment count BEFORE: ${countBefore}`);
-  c.setVariable(beforeVar, String(countBefore));
-  c.log(`Stored before count "${countBefore}" → $[${beforeVar}]`);
+  // ── Helper: read the h2 heading count ─────────────────────────────────────
+  // "Comments"    → 0   (plain label, no comments yet)
+  // "1 Comments"  → 1
+  // "5 Comments"  → 5
+  const readHeadingCount = async (): Promise<number> => {
+    let raw = '';
+    try { raw = (await c.getText(headingSelector) ?? '').trim(); } catch (_) {}
+    if (!raw) {
+      throw new Error(
+        `Heading element returned empty text. Selector: "${headingSelector}". ` +
+        `Make sure the blog detail page is open and the selector is correct.`
+      );
+    }
+    const match = raw.match(/\d+/);
+    if (match) return parseInt(match[0], 10);
+    if (/comments?/i.test(raw)) return 0;   // "Comments" with no leading number → 0
+    throw new Error(
+      `Could not parse comment count from heading text. ` +
+      `Selector: "${headingSelector}". Got: "${raw}"`
+    );
+  };
 
-  // 2. Poll up to 5s for the count to change
+  // ── 1. Read counts BEFORE action ──────────────────────────────────────────
+  const spanBefore    = await readSpanCount();
+  const headingBefore = await readHeadingCount();
+
+  c.log(`BEFORE — span: ${spanBefore}, heading: ${headingBefore === 0 ? '"Comments" (0)' : headingBefore}`);
+
+  if (spanBefore !== headingBefore) {
+    throw new Error(
+      `Comment counts disagree BEFORE action — ` +
+      `span shows ${spanBefore}, heading shows ${headingBefore}. ` +
+      `Verify both selectors target the same blog post.`
+    );
+  }
+
+  c.setVariable(beforeVar, String(spanBefore));
+  c.log(`Stored before count "${spanBefore}" → $[${beforeVar}]`);
+
+  // ── 2. Poll up to 5 s for both counts to update ───────────────────────────
   const maxWaitMs = 5000;
   const pollMs    = 300;
   const start     = Date.now();
-  let countAfter  = countBefore;
+  let spanAfter    = spanBefore;
+  let headingAfter = headingBefore;
 
   while (Date.now() - start < maxWaitMs) {
     await c.wait(pollMs);
-    try { countAfter = await readCount(); } catch (_) { continue; }
-    if (countAfter !== countBefore) break;
+    try { spanAfter    = await readSpanCount();    } catch (_) { continue; }
+    try { headingAfter = await readHeadingCount(); } catch (_) { continue; }
+    // Both must have changed from the before-values before we stop polling
+    if (spanAfter !== spanBefore && headingAfter !== headingBefore) break;
   }
 
-  // 3. Auto-detect direction and verify ±1
-  const delta = countAfter - countBefore;
+  c.log(`AFTER — span: ${spanAfter}, heading: ${headingAfter}`);
+
+  // ── 3. Cross-validate AFTER counts ────────────────────────────────────────
+  if (spanAfter !== headingAfter) {
+    throw new Error(
+      `Comment counts disagree AFTER action — ` +
+      `span shows ${spanAfter}, heading shows ${headingAfter}.`
+    );
+  }
+
+  // ── 4. Verify exactly ±1 ──────────────────────────────────────────────────
+  const delta = spanAfter - spanBefore;
 
   if (delta === 1) {
-    c.log(`Comment count INCREASED: ${countBefore} → ${countAfter} (comment added)`);
+    c.log(`Comment count INCREASED: ${spanBefore} → ${spanAfter} (comment added) ✓`);
   } else if (delta === -1) {
-    c.log(`Comment count DECREASED: ${countBefore} → ${countAfter} (comment deleted)`);
+    c.log(`Comment count DECREASED: ${spanBefore} → ${spanAfter} (comment deleted) ✓`);
   } else if (delta === 0) {
     throw new Error(
-      `Comment count did not change. Stayed at ${countBefore}. ` +
-      `Ensure the add/delete action was performed before this step.`
+      `Comment count did not change after ${maxWaitMs}ms. Both counters stayed at ${spanBefore}. ` +
+      `Make sure the add/delete action is performed BEFORE this step finishes.`
     );
   } else {
     throw new Error(
-      `Unexpected comment count change: ${countBefore} → ${countAfter} (delta ${delta}). Expected ±1.`
+      `Unexpected delta: ${spanBefore} → ${spanAfter} (delta ${delta}). Expected exactly ±1.`
     );
   }
 
-  // 4. Store count AFTER action
-  c.setVariable(afterVar, String(countAfter));
-  c.log(`Stored after count "${countAfter}" → $[${afterVar}]`);
+  // ── 5. Store after count ──────────────────────────────────────────────────
+  c.setVariable(afterVar, String(spanAfter));
+  c.log(`Stored after count "${spanAfter}" → $[${afterVar}]`);
 }
