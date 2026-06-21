@@ -1113,6 +1113,51 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         return markAndScroll(first.target, first.text, first.cardRole);
       }
 
+      // ── Variant E3: week/day-view card — same inner structure as E2 but NO data-apt-card attr ────
+      // Same card inner structure as E2 but the outer wrapper does not have [data-apt-card].
+      // Calendar card DOM (from week-view screenshot):
+      //   <div class="flex flex-col h-full px-2 py-1 gap-0.5 overflow-hidden">
+      //     <div class="flex items-center gap-1.5 min-w-0">
+      //       <div class="h-6 w-6 rounded-full ...">TV</div>
+      //       <span class="text-[13px] font-semibold leading-tight truncate text-gray-800">Tarulata Venkataraman</span>
+      //     </div>
+      //     <div class="rounded-md px-1.5 py-0.5 self-start" style="background-color: rgb(255,255,255);">
+      //       <span class="text-[10px] font-medium leading-tight truncate" style="color: rgb(22,163,74);">
+      //         "7:30 PM" " - " "8:00 PM"
+      //       </span>
+      //     </div>
+      //     <div class="flex items-center gap-1 mt-auto pl-0.5">
+      //       <span class="w-1.5 h-1.5 rounded-full flex-shrink-0"></span>
+      //       <span class="text-[12px] font-medium leading-tight truncate capitalize">md new patient oncology</span>
+      //     </div>
+      //   </div>
+      //
+      // Strategy: scan all <span class="text-[10px] font-medium leading-tight truncate"> elements,
+      // match time text, walk up to the nearest cursor-pointer ancestor for clicking.
+      {
+        const leadingTightSpans = Array.from(document.querySelectorAll(
+          'span[class*="leading-tight"][class*="font-medium"], span[class*="text-[10px]"][class*="leading-tight"]'
+        )) as HTMLElement[];
+        const matchedE3Cards: { target: HTMLElement; text: string; cardRole: string }[] = [];
+        for (const span of leadingTightSpans) {
+          const text = collapse(span.textContent ?? '');
+          if (!isMatch(text)) continue;
+          const target = findClickable(span);
+          const cardRole = extractCardRole(target);
+          matchedE3Cards.push({ target, text, cardRole });
+        }
+        if (matchedE3Cards.length > 0) {
+          if (roleFilter) {
+            const roleMatch = matchedE3Cards.find(
+              c => c.cardRole.trim().toLowerCase() === roleFilter.toLowerCase()
+            );
+            if (roleMatch) return markAndScroll(roleMatch.target, roleMatch.text, roleMatch.cardRole);
+          }
+          const first = matchedE3Cards[0];
+          return markAndScroll(first.target, first.text, first.cardRole);
+        }
+      }
+
       // ── Variant I: day-view modal card — time in <span class="inline-block ... rounded-md"> ────
       // Card structure (no data-apt-card attribute):
       //   <div class="px-3 pb-3">
