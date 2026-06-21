@@ -1003,12 +1003,10 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           }
 
           // ── Closest-card fallback ───────────────────────────────────────────────────────────────
-          // If no card fell within TOLERANCE (formula may be off for this page's pixel scale),
-          // pick the single [data-card] element whose style.top is closest to expectedTop.
-          // This handles pages where the pixel ratio differs from the calibrated formula.
-          // Guard: only use this fallback when there is exactly ONE best candidate
-          // (i.e. the closest card is significantly nearer than the second-closest),
-          // to avoid accidentally clicking the wrong slot.
+          // The pixel-top formula is unreliable across different page/screen sizes.
+          // From DOM evidence: 7:30 PM card has top:1680px but formula predicts 1920px (240px off).
+          // So simply pick the [data-card] whose style.top is CLOSEST to expectedTop — no cutoff.
+          // The ranking by diff ensures the nearest time slot is always selected.
           if (dataCards.length > 0) {
             const ranked: { card: HTMLElement; topPx: number; diff: number }[] = [];
             for (const card of dataCards) {
@@ -1018,10 +1016,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
               ranked.push({ card, topPx, diff: Math.abs(topPx - expectedTop) });
             }
             ranked.sort((a, b) => a.diff - b.diff);
-            // Use closest-card only if its diff is less than one slot height (80px default),
-            // ensuring we don't click across multiple slots.
-            const slotHeightPx = dataCards[0].style?.height ? parseFloat(dataCards[0].style.height) || 80 : 80;
-            if (ranked.length > 0 && ranked[0].diff < slotHeightPx) {
+            if (ranked.length > 0) {
               const best = ranked[0];
               const target = best.card.classList.contains('cursor-pointer') ? best.card : findClickable(best.card);
               return markAndScroll(target, f12, '', '', '');
