@@ -236,11 +236,42 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   //   the one whose <span class="text-[9px] font-bold ... rounded-full"> badge text matches the
   //   role (case-insensitive) is preferred. If role is unset or no match, the first card is used.
   //
-  // Detection strategy:
+  // ── Variant G — Week-view grid with data-card count badges (pixel-top time encoding) ──────────
+  //   Column container:
+  //     <div class="flex-1 relative bg-white"
+  //          style="min-width: 140px; height: 3840px; border-right: 1px solid rgb(229,231,235);">
+  //       ...
+  //     </div>
+  //   Slot card:
+  //     <div data-card="1"
+  //          class="absolute left-0 right-0 z-10 flex items-center justify-center cursor-pointer
+  //                 hover:bg-blue-50/60 transition-colors"
+  //          style="top: 1600px; height: 80px;">
+  //       <span class="text-lg font-bold text-btn-primary">1</span>
+  //     </div>
+  //   The time is NOT stored as text — it is encoded as the CSS `top` pixel offset.
+  //   From the DOM screenshot data points:
+  //     6:30 PM  →  top: 1600px
+  //     7:30 PM  →  top: 1920px
+  //     8:00 PM  →  top: 2080px   (Tuesday column)
+  //     2:40 PM  →  top: 2960px   (computed)
+  //     3:20 PM  →  top: 3120px   (computed)
+  //   These establish: 320 px = 60 min → px/min = 16/3.
+  //   Reference anchor: 6:30 PM = 1110 min from midnight → top = 1600
+  //     → offset = 1110 − (1600 × 3 / 16) = 810 min from midnight (= 13:30)
+  //   Formula: top_px = (totalMinutes − 810) × (16 / 3)
+  //   Match strategy:
+  //     1. Compute expected top_px from the slot's start time.
+  //     2. Find all [data-card] elements.
+  //     3. Click the one whose parsed `top` is within ±20 px of the expected value.
+  //   The column header above each column carries the weekday/date (same structure as Variant F).
+  //
+  //   Detection strategy:
   //   - Variant A/B/C: scan all <p> elements, match full time range text, walk up to cursor-pointer div
   //   - Variant D: find row whose two time <span> labels match start+end of target slot,
   //                then click the cursor-pointer card div in that same row
   //   - Variant E: scan data-apt-card elements, check all <span> texts for time match
+  //   - Variant G: find [data-card] elements, match by computed pixel top offset from slot time
   //   - Cross-format: both 12h and 24h candidates always tried (full12 + full24)
   //   - All matching uses equality (never partial includes) to avoid adjacent-slot false positives
   //   - Role filter: when multiple cards share a slot, $[role] selects the correct card
@@ -785,6 +816,126 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         return markAndScroll(first.target, first.text, first.cardRole, first.weekday, first.date);
       }
 
+      // ── Variant G: data-card week-view grid (pixel-top time encoding, count badge) ─────────────
+      // Column: <div class="flex-1 relative bg-white" style="min-width: 140px; height: 3840px; ...">
+      // Card:   <div data-card="1" class="absolute left-0 right-0 z-10 flex items-center
+      //              justify-center cursor-pointer hover:bg-blue-50/60 transition-colors"
+      //              style="top: 1600px; height: 80px;">
+      //           <span class="text-lg font-bold text-btn-primary">1</span>
+      //         </div>
+      // Time is encoded as CSS `top` pixel offset (not text).
+      // Calibration from DOM screenshots: 6:30 PM → top:1600px, 7:30 PM → top:1920px
+      //   → 320 px = 60 min  →  px/min = 16/3
+      //   Reference: 6:30 PM = 1110 min from midnight → offset = 1110 − (1600×3/16) = 810 min
+      //   Formula: top_px = (totalMinutes − 810) × (16/3)
+      //   Tolerance: ±20 px (< half a slot height of 80px) to absorb rounding.
+      // Strategy: parse start time → compute expected top → find nearest [data-card] within ±20px.
+      {
+        function timeToMinutes(t: string): number {
+          const m24 = t.trim().match(/^(\d{1,2}):(\d{2})$/);
+          if (m24) return parseInt(m24[1], 10) * 60 + parseInt(m24[2], 10);
+          const m12 = t.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+          if (m12) {
+            let h = parseInt(m12[1], 10);
+            const min = parseInt(m12[2], 10);
+            const p = m12[3].toUpperCase();
+            if (p === 'PM' && h !== 12) h += 12;
+            if (p === 'AM' && h === 12) h = 0;
+            return h * 60 + min;
+          }
+          return -1;
+        }
+
+        const startMins24 = timeToMinutes(s24);
+        const startMins12 = timeToMinutes(s12);
+        const startMins = startMins24 >= 0 ? startMins24 : startMins12;
+
+        if (startMins >= 0) {
+          // Compute expected top pixel value using calibrated formula
+          const PX_PER_MIN = 16 / 3;
+          const OFFSET_MINS = 810; // 13:30 from midnight
+          const expectedTop = (startMins - OFFSET_MINS) * PX_PER_MIN;
+          const TOLERANCE = 20; // px
+
+          const dataCards = Array.from(document.querySelectorAll('[data-card]')) as HTMLElement[];
+          const matchedDataCards: { target: HTMLElement; diff: number; weekday: string; date: string }[] = [];
+
+          for (const card of dataCards) {
+            const styleTop = (card.style && card.style.top) ? card.style.top : '';
+            const topPx = parseFloat(styleTop);
+            if (isNaN(topPx)) continue;
+            const diff = Math.abs(topPx - expectedTop);
+            if (diff <= TOLERANCE) {
+              // Read weekday/date from the column header (walk up to relative bg-white column)
+              let colEl: HTMLElement | null = card.parentElement;
+              while (colEl && colEl !== document.body) {
+                if (colEl.classList.contains('relative') && colEl.classList.contains('bg-white')) break;
+                colEl = colEl.parentElement;
+              }
+              let weekday = '';
+              let date = '';
+              if (colEl) {
+                // The week header sits in a sibling/parent structure — walk up to the grid row
+                // and look for a header div containing day + date spans
+                let gridRow: HTMLElement | null = colEl.parentElement;
+                if (gridRow) {
+                  // Find the column's index position among siblings
+                  const siblings = Array.from(gridRow.children) as HTMLElement[];
+                  const colIndex = siblings.indexOf(colEl);
+                  // Look for a header row above (previous sibling of the grid container)
+                  let headerRow: HTMLElement | null = gridRow.previousElementSibling as HTMLElement | null;
+                  while (headerRow) {
+                    const headerCols = Array.from(headerRow.querySelectorAll('th, td, [class*="font-bold"], [class*="text-center"]')) as HTMLElement[];
+                    if (headerCols.length > colIndex) {
+                      const col = headerCols[colIndex];
+                      const spans = Array.from(col.querySelectorAll('span')) as HTMLElement[];
+                      if (spans.length >= 2) {
+                        weekday = (spans[0].textContent ?? '').trim();
+                        date    = (spans[1].textContent ?? '').trim();
+                        break;
+                      }
+                    }
+                    headerRow = headerRow.previousElementSibling as HTMLElement | null;
+                  }
+                  // Fallback: look for adjacent number + day text directly in the column's parent header
+                  if (!weekday) {
+                    // Try the header text node approach — look for a sticky/fixed row at top
+                    const allHeaderDivs = Array.from(document.querySelectorAll('[class*="sticky"], [class*="font-bold"][class*="text-center"]')) as HTMLElement[];
+                    for (const hd of allHeaderDivs) {
+                      const spans = Array.from(hd.querySelectorAll('span')) as HTMLElement[];
+                      if (spans.length >= 2) {
+                        const dayText = (spans[0].textContent ?? '').trim();
+                        const dateText = (spans[1].textContent ?? '').trim();
+                        if (dayText && dateText && /^\d+$/.test(dateText)) {
+                          // Check if this header is visually above our column
+                          const hdRect = hd.getBoundingClientRect();
+                          const colRect = colEl.getBoundingClientRect();
+                          if (Math.abs(hdRect.left - colRect.left) < colRect.width) {
+                            weekday = dayText;
+                            date    = dateText;
+                            break;
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+              // The card itself is cursor-pointer — use it directly as the click target
+              const target = card.classList.contains('cursor-pointer') ? card : findClickable(card);
+              matchedDataCards.push({ target, diff, weekday, date });
+            }
+          }
+
+          if (matchedDataCards.length > 0) {
+            // Pick the card closest to the expected top (smallest diff)
+            matchedDataCards.sort((a, b) => a.diff - b.diff);
+            const best = matchedDataCards[0];
+            return markAndScroll(best.target, f12, '', best.weekday, best.date);
+          }
+        }
+      }
+
       // ── Variants A/B/C: scan all <p> tags for time match ─────────────────────────────────────
       // Variant A: <p class="text-[10px] leading-tight" ...>
       // Variant B: <p class="text-[10px] text-text-gray"> with 24h format
@@ -1209,6 +1360,50 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
             }
           } catch {
             // ignore
+          }
+        }
+
+        // Variant G fallback: data-card pixel-top week-view grid
+        {
+          function timeToMins(t: string): number {
+            const m24 = t.trim().match(/^(\d{1,2}):(\d{2})$/);
+            if (m24) return parseInt(m24[1], 10) * 60 + parseInt(m24[2], 10);
+            const m12 = t.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+            if (m12) {
+              let h = parseInt(m12[1], 10);
+              const min = parseInt(m12[2], 10);
+              const p = m12[3].toUpperCase();
+              if (p === 'PM' && h !== 12) h += 12;
+              if (p === 'AM' && h === 12) h = 0;
+              return h * 60 + min;
+            }
+            return -1;
+          }
+          const sm24 = timeToMins(s24);
+          const sm12 = timeToMins(s12);
+          const startMins = sm24 >= 0 ? sm24 : sm12;
+          if (startMins >= 0) {
+            const PX_PER_MIN = 16 / 3;
+            const OFFSET_MINS = 810;
+            const expectedTop = (startMins - OFFSET_MINS) * PX_PER_MIN;
+            const TOLERANCE = 20;
+            const dataCards2 = Array.from(document.querySelectorAll('[data-card]')) as HTMLElement[];
+            let bestCard: HTMLElement | null = null;
+            let bestDiff = Infinity;
+            for (const card of dataCards2) {
+              const styleTop = card.style ? card.style.top : '';
+              const topPx = parseFloat(styleTop);
+              if (isNaN(topPx)) continue;
+              const diff = Math.abs(topPx - expectedTop);
+              if (diff <= TOLERANCE && diff < bestDiff) {
+                bestDiff = diff;
+                bestCard = card;
+              }
+            }
+            if (bestCard) {
+              const target = bestCard.classList.contains('cursor-pointer') ? bestCard : findClickable(bestCard);
+              return markAndScroll2(target, f12, '');
+            }
           }
         }
 
