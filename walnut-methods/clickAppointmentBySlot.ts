@@ -449,24 +449,25 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
       return best;
     }
 
-    // ── Strategy A: find a rendered time-label SPAN (leaf, exact match) and scroll to it ─────────
-    // The calendar renders hour/half-hour labels in spans like "9 AM", "9:30 AM", "12 PM" etc.
-    // We use ONLY spans (not divs) with exact time-label text to avoid false matches on
-    // composite divs whose textContent aggregates multiple labels.
-    const labelSpans = Array.from(document.querySelectorAll('span')) as HTMLElement[];
+    // ── Strategy A: find a rendered time-label element (span or div leaf) and scroll to it ────────
+    // Most calendar variants render hour/half-hour labels in <span> elements.
+    // Variant H renders them in <div class="flex-shrink-0 ..."> divs whose direct textContent
+    // is the time (e.g. "6:30 PM"). We scan both span and div leaf elements so the pre-scroll
+    // works for all DOM variants.
+    const labelCandidates = Array.from(document.querySelectorAll('span, div')) as HTMLElement[];
     let bestLabelEl: HTMLElement | null = null;
     let bestDiff = Infinity;
 
-    for (const span of labelSpans) {
-      // Must be a leaf or near-leaf (textContent === own text)
-      const text = (span.textContent ?? '').trim();
-      if (!text || text.length > 12) continue; // time labels are short
+    for (const el of labelCandidates) {
+      // Only leaf or near-leaf elements — skip parents that aggregate multiple labels
+      const text = (el.textContent ?? '').trim();
+      if (!text || text.length > 12) continue; // time labels are short (e.g. "7:30 PM" = 7 chars)
       const mins = toMinutes(text);
       if (mins < 0) continue;
       const diff = Math.abs(mins - targetMins);
       if (diff < bestDiff) {
         bestDiff = diff;
-        bestLabelEl = span;
+        bestLabelEl = el;
       }
     }
 
@@ -485,12 +486,12 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
 
     // Try to detect px-per-hour from the DOM by finding two time labels with known positions
     const timeLabels: { mins: number; top: number }[] = [];
-    for (const span of labelSpans) {
-      const text = (span.textContent ?? '').trim();
+    for (const el of labelCandidates) {
+      const text = (el.textContent ?? '').trim();
       if (!text || text.length > 12) continue;
       const mins = toMinutes(text);
       if (mins < 0) continue;
-      const rect = span.getBoundingClientRect();
+      const rect = el.getBoundingClientRect();
       const containerRect = scrollContainer.getBoundingClientRect();
       const relTop = rect.top - containerRect.top + scrollContainer.scrollTop;
       timeLabels.push({ mins, top: relTop });
