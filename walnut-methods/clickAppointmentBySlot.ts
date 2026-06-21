@@ -853,173 +853,129 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         const startMins = startMins24 >= 0 ? startMins24 : startMins12;
 
         if (startMins >= 0) {
-          // ── Dynamically calibrate px-per-minute from time-label spans in the DOM ──────────────
-          // The hardcoded formula (OFFSET_MINS=810, PX_PER_MIN=16/3) only works for one specific
-          // calendar size. Instead, find two time-label spans with known minute values and measure
-          // their `top` offset inside the same column container to get px/min for THIS page.
+          // ── Match [data-card] by reading adjacent time-label text (no pixel formula) ─────────────
+          // The pixel-top formula is unreliable across page sizes (e.g. 7:30 PM showed top:1680px
+          // on one page but formula predicted 1920px, and "closest card" then picked 10:30 AM instead).
           //
-          // Strategy:
-          //   1. Find all [data-card] elements and collect their column containers.
-          //   2. Inside each container, find span/div elements whose text parses as a time.
-          //   3. Use two such labels to compute px/min and an anchor top offset.
-          //   4. Compute expectedTop = anchorTop + (startMins - anchorMins) * pxPerMin.
-          //   5. Tolerance = 1 slot height / 2 (derived from card height if available, else 40px).
+          // CORRECT STRATEGY:
+          //   Each [data-card] is positioned inside a column container whose sibling LEFT column
+          //   contains time-label spans ("7:30 PM", "8:00 PM"...) also positioned with style.top.
+          //   We pair each card's top with the nearest time-label top to read the actual time.
+          //   If the paired time matches the target slot → click that card.
           //
-          // Fallback: if calibration fails, use the hardcoded formula with wider ±80px tolerance.
+          //   Fallback chain:
+          //   1. Pair cards with time-label spans by matching top values (±5px).
+          //   2. If no pairing possible, use px/min ratio derived from two paired cards.
+          //   3. Only if ALL else fails, fall through to Variant H.
 
           const dataCards = Array.from(document.querySelectorAll('[data-card]')) as HTMLElement[];
 
-          // Collect column containers from data-card elements
-          const colContainers: HTMLElement[] = [];
-          for (const card of dataCards) {
-            let col: HTMLElement | null = card.parentElement;
-            while (col && col !== document.body) {
-              if (col.style && col.style.height && parseFloat(col.style.height) > 200) break;
-              col = col.parentElement;
-            }
-            if (col && !colContainers.includes(col)) colContainers.push(col);
-          }
-
-          // Find time labels (span or div) whose text is a parseable time
-          let pxPerMin = 16 / 3; // default fallback
-          let anchorTop = 0;
-          let anchorMins = 810;
-          let calibrated = false;
-
-          const containerForLabels = colContainers[0] ?? document.body;
-          const labelEls = Array.from(containerForLabels.querySelectorAll('span, div')) as HTMLElement[];
-          const timePts: { mins: number; top: number }[] = [];
-          for (const el of labelEls) {
+          // Collect all time-label elements that have style.top (the left-column time labels
+          // in the Variant G week-view have style.top matching the card positions).
+          // Also collect span/div elements with parseable time text anywhere on the page.
+          const allTimeLabels: { mins: number; topPx: number; el: HTMLElement }[] = [];
+          const allTextEls = Array.from(document.querySelectorAll('span, div')) as HTMLElement[];
+          for (const el of allTextEls) {
             const txt = (el.textContent ?? '').trim();
             if (!txt || txt.length > 10) continue;
             const mins = timeToMinutes(txt);
             if (mins < 0) continue;
-            const top = parseFloat(el.style.top ?? '');
-            if (!isNaN(top)) {
-              timePts.push({ mins, top });
-            }
-          }
-          // Sort by top and find two distinct points to calibrate
-          timePts.sort((a, b) => a.top - b.top);
-          for (let i = 1; i < timePts.length; i++) {
-            const dMin = timePts[i].mins - timePts[i - 1].mins;
-            const dPx  = timePts[i].top  - timePts[i - 1].top;
-            if (Math.abs(dMin) >= 30 && dPx > 0) {
-              pxPerMin = dPx / dMin;
-              anchorTop = timePts[i - 1].top;
-              anchorMins = timePts[i - 1].mins;
-              calibrated = true;
-              break;
+            // Only include elements that have their OWN style.top (not inherited)
+            const rawTop = el.style ? el.style.top : '';
+            if (!rawTop) continue;
+            const topPx = parseFloat(rawTop);
+            if (!isNaN(topPx)) {
+              allTimeLabels.push({ mins, topPx, el });
             }
           }
 
-          // Compute expectedTop using calibrated or fallback formula
-          let expectedTop: number;
-          let TOLERANCE: number;
-          if (calibrated) {
-            expectedTop = anchorTop + (startMins - anchorMins) * pxPerMin;
-            // Tolerance = half a slot height; slots are typically 30min, so half = 15min in px
-            TOLERANCE = Math.max(20, Math.abs(pxPerMin * 15));
-          } else {
-            // Fallback: use original hardcoded formula but with wider tolerance (±80px)
-            // to handle pages with slightly different pixel ratios
-            expectedTop = (startMins - 810) * (16 / 3);
-            TOLERANCE = 80;
-          }
-          const matchedDataCards: { target: HTMLElement; diff: number; weekday: string; date: string }[] = [];
+          // Build a map: for each [data-card], find the time-label whose top is closest to the card's top
+          // Then check if that paired time == startMins
+          const SLOT_HEIGHT = dataCards.length > 0 && dataCards[0].style?.height
+            ? (parseFloat(dataCards[0].style.height) || 80)
+            : 80;
+
+          // ── Strategy 1: pair each [data-card] with a time-label that shares the same top ───────
+          // Each card has style.top=Xpx. Time-label spans ("7:30 PM", "8:00 PM" etc.) in the
+          // left-column ALSO have style.top=Xpx (same value). Match card.top to label.top (±5px)
+          // to read the actual time for that card — no pixel formula needed.
+          const matchedDataCards: { target: HTMLElement; weekday: string; date: string }[] = [];
 
           for (const card of dataCards) {
-            const styleTop = (card.style && card.style.top) ? card.style.top : '';
-            const topPx = parseFloat(styleTop);
-            if (isNaN(topPx)) continue;
-            const diff = Math.abs(topPx - expectedTop);
-            if (diff <= TOLERANCE) {
-              // Read weekday/date from the column header (walk up to relative bg-white column)
-              let colEl: HTMLElement | null = card.parentElement;
-              while (colEl && colEl !== document.body) {
-                if (colEl.classList.contains('relative') && colEl.classList.contains('bg-white')) break;
-                colEl = colEl.parentElement;
+            const cardTopStr = (card.style && card.style.top) ? card.style.top : '';
+            const cardTopPx = parseFloat(cardTopStr);
+            if (isNaN(cardTopPx)) continue;
+
+            // Find the time-label whose top matches this card's top
+            let pairedMins = -1;
+            let bestLabelDiff = Infinity;
+            for (const lbl of allTimeLabels) {
+              const d = Math.abs(lbl.topPx - cardTopPx);
+              if (d < bestLabelDiff) {
+                bestLabelDiff = d;
+                pairedMins = lbl.mins;
               }
-              let weekday = '';
-              let date = '';
-              if (colEl) {
-                // The week header sits in a sibling/parent structure — walk up to the grid row
-                // and look for a header div containing day + date spans
-                let gridRow: HTMLElement | null = colEl.parentElement;
-                if (gridRow) {
-                  // Find the column's index position among siblings
-                  const siblings = Array.from(gridRow.children) as HTMLElement[];
-                  const colIndex = siblings.indexOf(colEl);
-                  // Look for a header row above (previous sibling of the grid container)
-                  let headerRow: HTMLElement | null = gridRow.previousElementSibling as HTMLElement | null;
-                  while (headerRow) {
-                    const headerCols = Array.from(headerRow.querySelectorAll('th, td, [class*="font-bold"], [class*="text-center"]')) as HTMLElement[];
-                    if (headerCols.length > colIndex) {
-                      const col = headerCols[colIndex];
-                      const spans = Array.from(col.querySelectorAll('span')) as HTMLElement[];
-                      if (spans.length >= 2) {
-                        weekday = (spans[0].textContent ?? '').trim();
-                        date    = (spans[1].textContent ?? '').trim();
-                        break;
-                      }
-                    }
-                    headerRow = headerRow.previousElementSibling as HTMLElement | null;
-                  }
-                  // Fallback: look for adjacent number + day text directly in the column's parent header
-                  if (!weekday) {
-                    // Try the header text node approach — look for a sticky/fixed row at top
-                    const allHeaderDivs = Array.from(document.querySelectorAll('[class*="sticky"], [class*="font-bold"][class*="text-center"]')) as HTMLElement[];
-                    for (const hd of allHeaderDivs) {
-                      const spans = Array.from(hd.querySelectorAll('span')) as HTMLElement[];
-                      if (spans.length >= 2) {
-                        const dayText = (spans[0].textContent ?? '').trim();
-                        const dateText = (spans[1].textContent ?? '').trim();
-                        if (dayText && dateText && /^\d+$/.test(dateText)) {
-                          // Check if this header is visually above our column
-                          const hdRect = hd.getBoundingClientRect();
-                          const colRect = colEl.getBoundingClientRect();
-                          if (Math.abs(hdRect.left - colRect.left) < colRect.width) {
-                            weekday = dayText;
-                            date    = dateText;
-                            break;
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-              // The card itself is cursor-pointer — use it directly as the click target
+            }
+
+            // Accept the pairing if the label top is within half a slot height of the card top
+            if (bestLabelDiff <= SLOT_HEIGHT / 2 && pairedMins === startMins) {
               const target = card.classList.contains('cursor-pointer') ? card : findClickable(card);
-              matchedDataCards.push({ target, diff, weekday, date });
+              matchedDataCards.push({ target, weekday: '', date: '' });
             }
           }
 
           if (matchedDataCards.length > 0) {
-            // Pick the card closest to the expected top (smallest diff)
-            matchedDataCards.sort((a, b) => a.diff - b.diff);
-            const best = matchedDataCards[0];
-            return markAndScroll(best.target, f12, '', best.weekday, best.date);
+            return markAndScroll(matchedDataCards[0].target, f12, '', '', '');
           }
 
-          // ── Closest-card fallback ───────────────────────────────────────────────────────────────
-          // The pixel-top formula is unreliable across different page/screen sizes.
-          // From DOM evidence: 7:30 PM card has top:1680px but formula predicts 1920px (240px off).
-          // So simply pick the [data-card] whose style.top is CLOSEST to expectedTop — no cutoff.
-          // The ranking by diff ensures the nearest time slot is always selected.
-          if (dataCards.length > 0) {
-            const ranked: { card: HTMLElement; topPx: number; diff: number }[] = [];
-            for (const card of dataCards) {
-              const styleTop = (card.style && card.style.top) ? card.style.top : '';
-              const topPx = parseFloat(styleTop);
-              if (isNaN(topPx)) continue;
-              ranked.push({ card, topPx, diff: Math.abs(topPx - expectedTop) });
+          // ── Strategy 2: calibrate px/min from paired (card.top, label.mins) points ────────────
+          // Build a list of (topPx, mins) pairs from all cards that could be paired with a label.
+          // Use two such pairs to derive pxPerMin and anchor, then compute expectedTop.
+          // Accept the card within ±(SLOT_HEIGHT/2) of expectedTop.
+          const cardTimePairs: { topPx: number; mins: number }[] = [];
+          for (const card of dataCards) {
+            const cardTopStr = (card.style && card.style.top) ? card.style.top : '';
+            const cardTopPx = parseFloat(cardTopStr);
+            if (isNaN(cardTopPx)) continue;
+            let bestPairedMins = -1;
+            let bestDiff2 = Infinity;
+            for (const lbl of allTimeLabels) {
+              const d = Math.abs(lbl.topPx - cardTopPx);
+              if (d < bestDiff2) { bestDiff2 = d; bestPairedMins = lbl.mins; }
             }
-            ranked.sort((a, b) => a.diff - b.diff);
-            if (ranked.length > 0) {
-              const best = ranked[0];
-              const target = best.card.classList.contains('cursor-pointer') ? best.card : findClickable(best.card);
-              return markAndScroll(target, f12, '', '', '');
+            if (bestDiff2 <= SLOT_HEIGHT && bestPairedMins >= 0) {
+              cardTimePairs.push({ topPx: cardTopPx, mins: bestPairedMins });
+            }
+          }
+
+          if (cardTimePairs.length >= 2) {
+            // Sort by topPx and pick two distinct time points to calibrate
+            cardTimePairs.sort((a, b) => a.topPx - b.topPx);
+            let calPxPerMin = -1;
+            let calAnchorTop = 0;
+            let calAnchorMins = 0;
+            for (let i = 1; i < cardTimePairs.length; i++) {
+              const dMin = cardTimePairs[i].mins - cardTimePairs[i - 1].mins;
+              const dPx  = cardTimePairs[i].topPx - cardTimePairs[i - 1].topPx;
+              if (Math.abs(dMin) >= 30 && dPx > 0) {
+                calPxPerMin = dPx / dMin;
+                calAnchorTop = cardTimePairs[i - 1].topPx;
+                calAnchorMins = cardTimePairs[i - 1].mins;
+                break;
+              }
+            }
+            if (calPxPerMin > 0) {
+              const calExpectedTop = calAnchorTop + (startMins - calAnchorMins) * calPxPerMin;
+              const calTolerance = SLOT_HEIGHT / 2;
+              for (const card of dataCards) {
+                const cardTopStr = (card.style && card.style.top) ? card.style.top : '';
+                const cardTopPx = parseFloat(cardTopStr);
+                if (isNaN(cardTopPx)) continue;
+                if (Math.abs(cardTopPx - calExpectedTop) <= calTolerance) {
+                  const target = card.classList.contains('cursor-pointer') ? card : findClickable(card);
+                  return markAndScroll(target, f12, '', '', '');
+                }
+              }
             }
           }
         }
@@ -1546,9 +1502,9 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           }
         }
 
-        // Variant G fallback: data-card pixel-top week-view grid
+        // Variant G fallback: data-card week-view grid — match by pairing card.top with time-label.top
         {
-          function timeToMins(t: string): number {
+          function timeToMins2(t: string): number {
             const m24 = t.trim().match(/^(\d{1,2}):(\d{2})$/);
             if (m24) return parseInt(m24[1], 10) * 60 + parseInt(m24[2], 10);
             const m12 = t.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
@@ -1562,30 +1518,70 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
             }
             return -1;
           }
-          const sm24 = timeToMins(s24);
-          const sm12 = timeToMins(s12);
-          const startMins = sm24 >= 0 ? sm24 : sm12;
-          if (startMins >= 0) {
-            const PX_PER_MIN = 16 / 3;
-            const OFFSET_MINS = 810;
-            const expectedTop = (startMins - OFFSET_MINS) * PX_PER_MIN;
-            const TOLERANCE = 20;
+          const sm24 = timeToMins2(s24);
+          const sm12 = timeToMins2(s12);
+          const targetMins2 = sm24 >= 0 ? sm24 : sm12;
+          if (targetMins2 >= 0) {
             const dataCards2 = Array.from(document.querySelectorAll('[data-card]')) as HTMLElement[];
-            let bestCard: HTMLElement | null = null;
-            let bestDiff = Infinity;
+            const slotH2 = dataCards2.length > 0 && dataCards2[0].style?.height
+              ? (parseFloat(dataCards2[0].style.height) || 80) : 80;
+            // Collect time-label elements with style.top
+            const lbls2: { mins: number; topPx: number }[] = [];
+            for (const el of Array.from(document.querySelectorAll('span, div')) as HTMLElement[]) {
+              const txt = (el.textContent ?? '').trim();
+              if (!txt || txt.length > 10) continue;
+              const m = timeToMins2(txt);
+              if (m < 0) continue;
+              const rawT = el.style ? el.style.top : '';
+              if (!rawT) continue;
+              const tp = parseFloat(rawT);
+              if (!isNaN(tp)) lbls2.push({ mins: m, topPx: tp });
+            }
+            // Strategy 1: pair card.top with label.top
             for (const card of dataCards2) {
-              const styleTop = card.style ? card.style.top : '';
-              const topPx = parseFloat(styleTop);
-              if (isNaN(topPx)) continue;
-              const diff = Math.abs(topPx - expectedTop);
-              if (diff <= TOLERANCE && diff < bestDiff) {
-                bestDiff = diff;
-                bestCard = card;
+              const cardTop = parseFloat(card.style ? card.style.top : '');
+              if (isNaN(cardTop)) continue;
+              let bestM = -1, bestD = Infinity;
+              for (const lbl of lbls2) {
+                const d = Math.abs(lbl.topPx - cardTop);
+                if (d < bestD) { bestD = d; bestM = lbl.mins; }
+              }
+              if (bestD <= slotH2 / 2 && bestM === targetMins2) {
+                const target = card.classList.contains('cursor-pointer') ? card : findClickable(card);
+                return markAndScroll2(target, f12, '');
               }
             }
-            if (bestCard) {
-              const target = bestCard.classList.contains('cursor-pointer') ? bestCard : findClickable(bestCard);
-              return markAndScroll2(target, f12, '');
+            // Strategy 2: calibrate px/min from paired cards and interpolate
+            const pairs2: { topPx: number; mins: number }[] = [];
+            for (const card of dataCards2) {
+              const cardTop = parseFloat(card.style ? card.style.top : '');
+              if (isNaN(cardTop)) continue;
+              let bestM = -1, bestD = Infinity;
+              for (const lbl of lbls2) {
+                const d = Math.abs(lbl.topPx - cardTop);
+                if (d < bestD) { bestD = d; bestM = lbl.mins; }
+              }
+              if (bestD <= slotH2 && bestM >= 0) pairs2.push({ topPx: cardTop, mins: bestM });
+            }
+            if (pairs2.length >= 2) {
+              pairs2.sort((a, b) => a.topPx - b.topPx);
+              for (let i = 1; i < pairs2.length; i++) {
+                const dM = pairs2[i].mins - pairs2[i - 1].mins;
+                const dP = pairs2[i].topPx - pairs2[i - 1].topPx;
+                if (Math.abs(dM) >= 30 && dP > 0) {
+                  const ratio = dP / dM;
+                  const expTop = pairs2[i - 1].topPx + (targetMins2 - pairs2[i - 1].mins) * ratio;
+                  for (const card of dataCards2) {
+                    const cardTop = parseFloat(card.style ? card.style.top : '');
+                    if (isNaN(cardTop)) continue;
+                    if (Math.abs(cardTop - expTop) <= slotH2 / 2) {
+                      const target = card.classList.contains('cursor-pointer') ? card : findClickable(card);
+                      return markAndScroll2(target, f12, '');
+                    }
+                  }
+                  break;
+                }
+              }
             }
           }
         }
