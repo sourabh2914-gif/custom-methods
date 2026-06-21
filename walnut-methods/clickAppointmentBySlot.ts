@@ -853,13 +853,79 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         const startMins = startMins24 >= 0 ? startMins24 : startMins12;
 
         if (startMins >= 0) {
-          // Compute expected top pixel value using calibrated formula
-          const PX_PER_MIN = 16 / 3;
-          const OFFSET_MINS = 810; // 13:30 from midnight
-          const expectedTop = (startMins - OFFSET_MINS) * PX_PER_MIN;
-          const TOLERANCE = 20; // px
+          // ── Dynamically calibrate px-per-minute from time-label spans in the DOM ──────────────
+          // The hardcoded formula (OFFSET_MINS=810, PX_PER_MIN=16/3) only works for one specific
+          // calendar size. Instead, find two time-label spans with known minute values and measure
+          // their `top` offset inside the same column container to get px/min for THIS page.
+          //
+          // Strategy:
+          //   1. Find all [data-card] elements and collect their column containers.
+          //   2. Inside each container, find span/div elements whose text parses as a time.
+          //   3. Use two such labels to compute px/min and an anchor top offset.
+          //   4. Compute expectedTop = anchorTop + (startMins - anchorMins) * pxPerMin.
+          //   5. Tolerance = 1 slot height / 2 (derived from card height if available, else 40px).
+          //
+          // Fallback: if calibration fails, use the hardcoded formula with wider ±80px tolerance.
 
           const dataCards = Array.from(document.querySelectorAll('[data-card]')) as HTMLElement[];
+
+          // Collect column containers from data-card elements
+          const colContainers: HTMLElement[] = [];
+          for (const card of dataCards) {
+            let col: HTMLElement | null = card.parentElement;
+            while (col && col !== document.body) {
+              if (col.style && col.style.height && parseFloat(col.style.height) > 200) break;
+              col = col.parentElement;
+            }
+            if (col && !colContainers.includes(col)) colContainers.push(col);
+          }
+
+          // Find time labels (span or div) whose text is a parseable time
+          let pxPerMin = 16 / 3; // default fallback
+          let anchorTop = 0;
+          let anchorMins = 810;
+          let calibrated = false;
+
+          const containerForLabels = colContainers[0] ?? document.body;
+          const labelEls = Array.from(containerForLabels.querySelectorAll('span, div')) as HTMLElement[];
+          const timePts: { mins: number; top: number }[] = [];
+          for (const el of labelEls) {
+            const txt = (el.textContent ?? '').trim();
+            if (!txt || txt.length > 10) continue;
+            const mins = timeToMinutes(txt);
+            if (mins < 0) continue;
+            const top = parseFloat(el.style.top ?? '');
+            if (!isNaN(top)) {
+              timePts.push({ mins, top });
+            }
+          }
+          // Sort by top and find two distinct points to calibrate
+          timePts.sort((a, b) => a.top - b.top);
+          for (let i = 1; i < timePts.length; i++) {
+            const dMin = timePts[i].mins - timePts[i - 1].mins;
+            const dPx  = timePts[i].top  - timePts[i - 1].top;
+            if (Math.abs(dMin) >= 30 && dPx > 0) {
+              pxPerMin = dPx / dMin;
+              anchorTop = timePts[i - 1].top;
+              anchorMins = timePts[i - 1].mins;
+              calibrated = true;
+              break;
+            }
+          }
+
+          // Compute expectedTop using calibrated or fallback formula
+          let expectedTop: number;
+          let TOLERANCE: number;
+          if (calibrated) {
+            expectedTop = anchorTop + (startMins - anchorMins) * pxPerMin;
+            // Tolerance = half a slot height; slots are typically 30min, so half = 15min in px
+            TOLERANCE = Math.max(20, Math.abs(pxPerMin * 15));
+          } else {
+            // Fallback: use original hardcoded formula but with wider tolerance (±80px)
+            // to handle pages with slightly different pixel ratios
+            expectedTop = (startMins - 810) * (16 / 3);
+            TOLERANCE = 80;
+          }
           const matchedDataCards: { target: HTMLElement; diff: number; weekday: string; date: string }[] = [];
 
           for (const card of dataCards) {
@@ -934,6 +1000,32 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
             matchedDataCards.sort((a, b) => a.diff - b.diff);
             const best = matchedDataCards[0];
             return markAndScroll(best.target, f12, '', best.weekday, best.date);
+          }
+
+          // ── Closest-card fallback ───────────────────────────────────────────────────────────────
+          // If no card fell within TOLERANCE (formula may be off for this page's pixel scale),
+          // pick the single [data-card] element whose style.top is closest to expectedTop.
+          // This handles pages where the pixel ratio differs from the calibrated formula.
+          // Guard: only use this fallback when there is exactly ONE best candidate
+          // (i.e. the closest card is significantly nearer than the second-closest),
+          // to avoid accidentally clicking the wrong slot.
+          if (dataCards.length > 0) {
+            const ranked: { card: HTMLElement; topPx: number; diff: number }[] = [];
+            for (const card of dataCards) {
+              const styleTop = (card.style && card.style.top) ? card.style.top : '';
+              const topPx = parseFloat(styleTop);
+              if (isNaN(topPx)) continue;
+              ranked.push({ card, topPx, diff: Math.abs(topPx - expectedTop) });
+            }
+            ranked.sort((a, b) => a.diff - b.diff);
+            // Use closest-card only if its diff is less than one slot height (80px default),
+            // ensuring we don't click across multiple slots.
+            const slotHeightPx = dataCards[0].style?.height ? parseFloat(dataCards[0].style.height) || 80 : 80;
+            if (ranked.length > 0 && ranked[0].diff < slotHeightPx) {
+              const best = ranked[0];
+              const target = best.card.classList.contains('cursor-pointer') ? best.card : findClickable(best.card);
+              return markAndScroll(target, f12, '', '', '');
+            }
           }
         }
       }
