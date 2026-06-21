@@ -959,32 +959,44 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
       {
         const hRows = Array.from(document.querySelectorAll('div.flex.cursor-pointer')) as HTMLElement[];
         const matchedHRows: { target: HTMLElement; weekday: string; date: string }[] = [];
+
+        function normLabelH(t: string): string {
+          return t.replace(/\b0(\d)(:\d{2})/g, '$1$2').trim();
+        }
+        const s12Norm = normLabelH(s12);
+        const s24Norm = normLabelH(s24);
+
         for (const row of hRows) {
-          // Must have a flex-shrink-0 child as direct child (the time label)
+          // Must have a flex-shrink-0 direct child (the time label)
           const labelDiv = row.querySelector(':scope > div.flex-shrink-0') as HTMLElement | null;
           if (!labelDiv) continue;
-          // Must also have a flex-1 child with the count badge
-          const contentDiv = row.querySelector(':scope > div.flex-1') as HTMLElement | null;
-          if (!contentDiv) continue;
-          // Must contain the count badge span
-          const badge = contentDiv.querySelector('span.text-btn-primary, span[class*="text-btn-primary"]') as HTMLElement | null;
-          if (!badge) continue;
 
-          // Read the time label text and normalise
+          // Read and normalise the time label
           const labelRaw = (labelDiv.textContent ?? '').replace(/\s+/g, ' ').trim();
-          // Normalise: strip leading zeros, handle both 12h and 24h
-          function normLabelH(t: string): string {
-            // Strip leading zero on hour
-            return t.replace(/\b0(\d)(:\d{2})/g, '$1$2').trim();
-          }
           const labelNorm = normLabelH(labelRaw);
-          // Compare against both 12h and 24h start-time candidates
-          const s12Norm = normLabelH(s12);
-          const s24Norm = normLabelH(s24);
           if (labelNorm !== s12Norm && labelNorm !== s24Norm) continue;
 
-          // Row matched — use the row itself as the click target (it is cursor-pointer)
-          matchedHRows.push({ target: row, weekday: '', date: '' });
+          // Time label matches — find the specific flex-1 column that contains the badge.
+          // In multi-column week-views each row has multiple flex-1 divs (one per day).
+          // We must click the SPECIFIC column div that has the badge, not the whole row —
+          // clicking the whole row lands at the row's center which is often an empty column.
+          const allContentDivs = Array.from(row.querySelectorAll(':scope > div.flex-1')) as HTMLElement[];
+          let badgeCol: HTMLElement | null = null;
+          for (const col of allContentDivs) {
+            if (col.querySelector('span.text-btn-primary, span[class*="text-btn-primary"]') !== null) {
+              badgeCol = col;
+              break;
+            }
+          }
+          // Fallback: use the badge span's parent if not found via flex-1 scan
+          if (!badgeCol) {
+            const badgeSpan = row.querySelector('span.text-btn-primary, span[class*="text-btn-primary"]') as HTMLElement | null;
+            if (badgeSpan) badgeCol = badgeSpan.parentElement as HTMLElement | null;
+          }
+          if (!badgeCol) continue;
+
+          // Click the specific column div containing the badge (not the whole row)
+          matchedHRows.push({ target: badgeCol, weekday: '', date: '' });
         }
         if (matchedHRows.length > 0) {
           const best = matchedHRows[0];
@@ -1425,17 +1437,25 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           for (const row of hRows2) {
             const labelDiv = row.querySelector(':scope > div.flex-shrink-0') as HTMLElement | null;
             if (!labelDiv) continue;
-            const contentDiv = row.querySelector(':scope > div.flex-1') as HTMLElement | null;
-            if (!contentDiv) continue;
-            const badge = contentDiv.querySelector('span.text-btn-primary, span[class*="text-btn-primary"]') as HTMLElement | null;
-            if (!badge) continue;
             const labelRaw = (labelDiv.textContent ?? '').replace(/\s+/g, ' ').trim()
               .replace(/\b0(\d)(:\d{2})/g, '$1$2');
             const s12c = s12.replace(/\b0(\d)(:\d{2})/g, '$1$2');
             const s24c = s24.replace(/\b0(\d)(:\d{2})/g, '$1$2');
-            if (labelRaw === s12c || labelRaw === s24c) {
-              return markAndScroll2(row, f12, '');
+            if (labelRaw !== s12c && labelRaw !== s24c) continue;
+            // Find the specific flex-1 column with the badge — click it, not the whole row
+            const allCols2 = Array.from(row.querySelectorAll(':scope > div.flex-1')) as HTMLElement[];
+            let badgeCol2: HTMLElement | null = null;
+            for (const col of allCols2) {
+              if (col.querySelector('span.text-btn-primary, span[class*="text-btn-primary"]') !== null) {
+                badgeCol2 = col;
+                break;
+              }
             }
+            if (!badgeCol2) {
+              const bs = row.querySelector('span.text-btn-primary, span[class*="text-btn-primary"]') as HTMLElement | null;
+              if (bs) badgeCol2 = bs.parentElement as HTMLElement | null;
+            }
+            if (badgeCol2) return markAndScroll2(badgeCol2, f12, '');
           }
         }
 
