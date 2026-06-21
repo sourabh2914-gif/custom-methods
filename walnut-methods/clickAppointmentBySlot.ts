@@ -272,6 +272,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   //                then click the cursor-pointer card div in that same row
   //   - Variant E: scan data-apt-card elements, check all <span> texts for time match
   //   - Variant G: find [data-card] elements, match by computed pixel top offset from slot time
+  //   - Variant H: find flex cursor-pointer rows whose flex-shrink-0 time-label div matches slot start time
   //   - Cross-format: both 12h and 24h candidates always tried (full12 + full24)
   //   - All matching uses equality (never partial includes) to avoid adjacent-slot false positives
   //   - Role filter: when multiple cards share a slot, $[role] selects the correct card
@@ -936,6 +937,60 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         }
       }
 
+      // ── Variant H: flex row with inline time label and count badge ─────────────────────────────
+      // Row: <div class="flex border-b border-gray-100 ... relative cursor-pointer bg-white hover:bg-gray-50"
+      //           style="min-height: 50px;">
+      //   <div class="flex-shrink-0 flex items-center justify-center text-xs font-medium whitespace-nowrap
+      //               border-r border-gray-200 bg-white text-gray-400" style="width: 80px; min-height: 50px;">
+      //     6:30 PM
+      //   </div>
+      //   <div class="flex-1 relative" style="min-height: 50px;">
+      //     <div class="absolute inset-0 flex items-center pl-4">
+      //       <span class="text-lg font-bold text-btn-primary">1</span>
+      //     </div>
+      //   </div>
+      // </div>
+      //
+      // The time IS stored as text in the flex-shrink-0 label div (e.g. "6:30 PM").
+      // The entire outer row div is cursor-pointer — that is what gets clicked.
+      // Match strategy: scan all flex cursor-pointer rows, read the flex-shrink-0 child text,
+      // normalise to 12h/24h, compare against start12/start24 of the target slot.
+      {
+        const hRows = Array.from(document.querySelectorAll('div.flex.cursor-pointer')) as HTMLElement[];
+        const matchedHRows: { target: HTMLElement; weekday: string; date: string }[] = [];
+        for (const row of hRows) {
+          // Must have a flex-shrink-0 child as direct child (the time label)
+          const labelDiv = row.querySelector(':scope > div.flex-shrink-0') as HTMLElement | null;
+          if (!labelDiv) continue;
+          // Must also have a flex-1 child with the count badge
+          const contentDiv = row.querySelector(':scope > div.flex-1') as HTMLElement | null;
+          if (!contentDiv) continue;
+          // Must contain the count badge span
+          const badge = contentDiv.querySelector('span.text-btn-primary, span[class*="text-btn-primary"]') as HTMLElement | null;
+          if (!badge) continue;
+
+          // Read the time label text and normalise
+          const labelRaw = (labelDiv.textContent ?? '').replace(/\s+/g, ' ').trim();
+          // Normalise: strip leading zeros, handle both 12h and 24h
+          function normLabelH(t: string): string {
+            // Strip leading zero on hour
+            return t.replace(/\b0(\d)(:\d{2})/g, '$1$2').trim();
+          }
+          const labelNorm = normLabelH(labelRaw);
+          // Compare against both 12h and 24h start-time candidates
+          const s12Norm = normLabelH(s12);
+          const s24Norm = normLabelH(s24);
+          if (labelNorm !== s12Norm && labelNorm !== s24Norm) continue;
+
+          // Row matched — use the row itself as the click target (it is cursor-pointer)
+          matchedHRows.push({ target: row, weekday: '', date: '' });
+        }
+        if (matchedHRows.length > 0) {
+          const best = matchedHRows[0];
+          return markAndScroll(best.target, f12, '', best.weekday, best.date);
+        }
+      }
+
       // ── Variants A/B/C: scan all <p> tags for time match ─────────────────────────────────────
       // Variant A: <p class="text-[10px] leading-tight" ...>
       // Variant B: <p class="text-[10px] text-text-gray"> with 24h format
@@ -1360,6 +1415,26 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
             }
           } catch {
             // ignore
+          }
+        }
+
+        // Variant H fallback: flex cursor-pointer row with inline time label
+        {
+          const hRows2 = Array.from(document.querySelectorAll('div.flex.cursor-pointer')) as HTMLElement[];
+          for (const row of hRows2) {
+            const labelDiv = row.querySelector(':scope > div.flex-shrink-0') as HTMLElement | null;
+            if (!labelDiv) continue;
+            const contentDiv = row.querySelector(':scope > div.flex-1') as HTMLElement | null;
+            if (!contentDiv) continue;
+            const badge = contentDiv.querySelector('span.text-btn-primary, span[class*="text-btn-primary"]') as HTMLElement | null;
+            if (!badge) continue;
+            const labelRaw = (labelDiv.textContent ?? '').replace(/\s+/g, ' ').trim()
+              .replace(/\b0(\d)(:\d{2})/g, '$1$2');
+            const s12c = s12.replace(/\b0(\d)(:\d{2})/g, '$1$2');
+            const s24c = s24.replace(/\b0(\d)(:\d{2})/g, '$1$2');
+            if (labelRaw === s12c || labelRaw === s24c) {
+              return markAndScroll2(row, f12, '');
+            }
           }
         }
 
