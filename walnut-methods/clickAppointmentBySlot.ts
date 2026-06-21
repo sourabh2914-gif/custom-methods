@@ -471,11 +471,27 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
       }
     }
 
-    if (bestLabelEl && bestDiff <= 60) {
-      // Found a time label within 60 min of target — scroll it to the top of the viewport
-      // so the card for that slot (which starts AT the label and extends downward) is visible.
-      // Use 'start' not 'center' — 'center' puts the label mid-screen but the card body is below.
-      bestLabelEl.scrollIntoView({ behavior: 'instant', block: 'start' });
+    if (bestLabelEl) {
+      // Found the nearest time label — scroll it into view via its own scroll container first
+      // (handles both modal scroll containers and page-level calendars).
+      // Try scrolling via the scroll container for precision; fall back to scrollIntoView.
+      const scrollParentA = (function findSP(el: HTMLElement): HTMLElement | null {
+        let cur = el.parentElement;
+        while (cur && cur !== document.body) {
+          const ov = window.getComputedStyle(cur).overflowY;
+          if ((ov === 'scroll' || ov === 'auto') && cur.scrollHeight > cur.clientHeight) return cur;
+          cur = cur.parentElement;
+        }
+        return null;
+      })(bestLabelEl);
+      if (scrollParentA) {
+        const pRect = scrollParentA.getBoundingClientRect();
+        const eRect = bestLabelEl.getBoundingClientRect();
+        const elRelTop = eRect.top - pRect.top + scrollParentA.scrollTop;
+        scrollParentA.scrollTop = Math.max(0, elRelTop - 100); // 100px top margin
+      } else {
+        bestLabelEl.scrollIntoView({ behavior: 'instant', block: 'start' });
+      }
       return;
     }
 
@@ -1151,6 +1167,8 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
             const roleMatch = matchedE3Cards.find(
               c => c.cardRole.trim().toLowerCase() === roleFilter.toLowerCase()
             );
+            // If role matched, use it; otherwise fall back to first card
+            // (Variant E3 cards may not have a role badge at all)
             if (roleMatch) return markAndScroll(roleMatch.target, roleMatch.text, roleMatch.cardRole);
           }
           const first = matchedE3Cards[0];
