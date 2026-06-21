@@ -1113,6 +1113,49 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         return markAndScroll(first.target, first.text, first.cardRole);
       }
 
+      // ── Variant I: day-view modal card — time in <span class="inline-block ... rounded-md"> ────
+      // Card structure (no data-apt-card attribute):
+      //   <div class="px-3 pb-3">
+      //     <p class="text-[13px] font-semibold text-gray-900 ...">Tarulata Robert Venkataraman</p>
+      //     <span class="inline-block text-[10px] font-medium whitespace-nowrap px-2 py-0.5 rounded-md bg-white"
+      //           style="color: rgb(22, 163, 74);">
+      //       "6:30 PM" " - " "7 PM"
+      //     </span>
+      //     <p class="mt-1 flex items-center gap-1 ...">
+      //       <span class="w-1.5 h-1.5 rounded-full flex-shrink-0" style="..."></span>
+      //       "Md New Patient Oncology"
+      //     </p>
+      //   </div>
+      //
+      // Time is in a <span class="inline-block ... rounded-md"> — NOT in a <p> and NOT in [data-apt-card].
+      // The text nodes are collapsed: "6:30 PM - 7 PM" → matched by isMatch() which normalises
+      // dash separators and strips :00 minutes.
+      // Strategy: scan all <span> elements with "inline-block" and "rounded-md" classes,
+      // collapse their text, run isMatch(), then walk up to the nearest cursor-pointer ancestor.
+      {
+        const roundedSpans = Array.from(document.querySelectorAll(
+          'span[class*="inline-block"][class*="rounded-md"], span[class*="inline-block"][class*="rounded"]'
+        )) as HTMLElement[];
+        const matchedICards: { target: HTMLElement; text: string; cardRole: string }[] = [];
+        for (const span of roundedSpans) {
+          const text = collapse(span.textContent ?? '');
+          if (!isMatch(text)) continue;
+          const target = findClickable(span);
+          const cardRole = extractCardRole(target);
+          matchedICards.push({ target, text, cardRole });
+        }
+        if (matchedICards.length > 0) {
+          if (roleFilter) {
+            const roleMatch = matchedICards.find(
+              c => c.cardRole.trim().toLowerCase() === roleFilter.toLowerCase()
+            );
+            if (roleMatch) return markAndScroll(roleMatch.target, roleMatch.text, roleMatch.cardRole);
+          }
+          const first = matchedICards[0];
+          return markAndScroll(first.target, first.text, first.cardRole);
+        }
+      }
+
       // ── Variant D: week-view row with two time <span> labels ──────────────────────────────────
       // Row: <div class="flex" style="...height: 175px;">
       //   Left col: <div class="flex-shrink-0 flex flex-col justify-between ...">
