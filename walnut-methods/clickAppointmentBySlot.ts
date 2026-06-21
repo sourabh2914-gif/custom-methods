@@ -2,7 +2,7 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Click Appointment By Slot
- * description: Click the appointment card matching $[selectedslot] with optional role filter $[role] and verify details changed
+ * description: Click the appointment card matching $[selectedslot] with optional role filter ${role} and verify details changed
  * actionType: custom_click_appointment_by_slot
  * context: web
  * needsLocator: false
@@ -286,7 +286,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
 
   const c = ctx as any;
   const slotVarName = ctx.args[0]; // e.g. "selectedslot"
-  const roleVarName = ctx.args[1] as string | undefined; // e.g. "role" (optional)
+  const roleArg      = (ctx.args[1] as string | undefined ?? '').trim(); // e.g. "Doctor" or "Nurse" — typed directly by user (optional)
   const weekdayVarName = ctx.args[2] as string | undefined; // e.g. "weekday" (optional output)
   const dateVarName    = ctx.args[3] as string | undefined; // e.g. "date" (optional output)
 
@@ -300,11 +300,12 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
     );
   }
 
-  // Read optional role filter — empty string / undefined means no role filter
-  const roleFilter: string = roleVarName ? ((ctx.getVariable(roleVarName) as string | undefined) ?? '').trim() : '';
+  // Role filter — provided as a plain local value (e.g. "Doctor", "Nurse").
+  // Empty string means no role filter; if a single card exists it is clicked regardless.
+  const roleFilter: string = roleArg;
 
   ctx.log(`Slot from $[${slotVarName}]: "${rawSlot}"`);
-  if (roleFilter) ctx.log(`Role filter from $[${roleVarName}]: "${roleFilter}"`);
+  if (roleFilter) ctx.log(`Role filter: "${roleFilter}"`);
 
   // ── Step 2: Normalize and build match candidates ───────────────────────────────────────────────
   // We need to handle:
@@ -607,6 +608,226 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
 
   // Wait for modal scroll to settle before running the querySelector scan
   await c.wait(400);
+
+  // ── Variant J: collapsed slot with "+N more" button ──────────────────────────────────────────
+  // When multiple cards share a time slot the calendar collapses them into one visible card plus
+  // a "+N more" button:
+  //   <button class="w-full flex-shrink-0 flex items-center justify-center gap-1 py-1
+  //                  border-t border-gray-200 text-[10px] font-semibold text-gray-500
+  //                  hover:bg-gray-50 hover:text-gray-800 transition-colors">
+  //     "+" "1" " more"
+  //   </button>
+  //
+  // Strategy:
+  //   1. Scan all visible "+N more" buttons near a card whose time matches the target slot.
+  //   2. If found, click it via Playwright (triggers a popup/expansion showing all cards).
+  //   3. Wait for the popup to appear.
+  //   4. Inside the popup, find the card whose role badge matches roleFilter; click it.
+  //   5. If no roleFilter, click the first expanded card.
+  //
+  // The expanded popup contains card rows like:
+  //   <div class="flex flex-col gap-1 min-w-0 flex-1">
+  //     <span class="text-sm font-semibold text-gray-900 truncate">Dr. Johnc Smith</span>
+  //     <span class="text-[10px] font-semibold px-2 py-0.5 rounded-full w-fit"
+  //           style="background-color: rgb(240,253,244); color: rgb(21,128,61);">
+  //       MD New Patient-Oncology
+  //     </span>
+  //     <div class="flex items-center gap-1 text-xs text-gray-400">
+  //       <svg ...></svg>
+  //       <span>"09:30" " - " "10:00"</span>
+  //     </div>
+  //   </div>
+  //
+  // Time in popup is "HH:MM" 24h (no AM/PM), separator " - " (hyphen).
+  // Role is in the badge span (text-[10px] font-semibold px-2 py-0.5 rounded-full w-fit).
+
+  const moreBtnMarker = 'data-walnut-more-btn';
+  const moreFoundResult: { found: boolean } = await c.page.evaluate(
+    ({ f12, f24, s12, s24, moreBtnMarker }: { f12: string; f24: string; s12: string; s24: string; moreBtnMarker: string }) => {
+      function collapse(t: string) { return t.replace(/\s+/g, ' ').trim(); }
+
+      // Parse "HH:MM" 24h or "H:MM AM/PM" to minutes
+      function toMins(t: string): number {
+        const m24 = t.trim().match(/^(\d{1,2}):(\d{2})$/);
+        if (m24) return parseInt(m24[1], 10) * 60 + parseInt(m24[2], 10);
+        const m12 = t.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+        if (m12) {
+          let h = parseInt(m12[1], 10); const min = parseInt(m12[2], 10);
+          if (m12[3].toUpperCase() === 'PM' && h !== 12) h += 12;
+          if (m12[3].toUpperCase() === 'AM' && h === 12) h = 0;
+          return h * 60 + min;
+        }
+        return -1;
+      }
+
+      const targetMins = toMins(s24) >= 0 ? toMins(s24) : toMins(s12);
+
+      // Find all "+N more" buttons (text starts with "+" and contains "more")
+      const allBtns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+      for (const btn of allBtns) {
+        const txt = collapse(btn.textContent ?? '');
+        if (!txt.startsWith('+') || !txt.includes('more')) continue;
+
+        // Check that a sibling/nearby card in the same container matches the target slot
+        const container = btn.parentElement;
+        if (!container) continue;
+
+        // Look for a time span near this button (sibling card content)
+        let timeFound = false;
+        const nearSpans = Array.from(container.querySelectorAll('span')) as HTMLElement[];
+        for (const sp of nearSpans) {
+          const spTxt = collapse(sp.textContent ?? '');
+          // "09:30" or "09:30 - 10:00" or "9:30 AM"
+          const m = toMins(spTxt);
+          if (m >= 0 && m === targetMins) { timeFound = true; break; }
+          // Also check combined "HH:MM - HH:MM" form
+          const parts = spTxt.split(/\s*-\s*/);
+          if (parts.length === 2 && toMins(parts[0]) === targetMins) { timeFound = true; break; }
+        }
+        // Also search parent siblings if not found yet
+        if (!timeFound && container.parentElement) {
+          for (const sp of Array.from(container.parentElement.querySelectorAll('span')) as HTMLElement[]) {
+            const spTxt = collapse(sp.textContent ?? '');
+            const m = toMins(spTxt);
+            if (m >= 0 && m === targetMins) { timeFound = true; break; }
+            const parts = spTxt.split(/\s*-\s*/);
+            if (parts.length === 2 && toMins(parts[0]) === targetMins) { timeFound = true; break; }
+          }
+        }
+
+        if (timeFound) {
+          btn.setAttribute(moreBtnMarker, '1');
+          return { found: true };
+        }
+      }
+      return { found: false };
+    },
+    { f12: full12, f24: full24, s12: start12, s24: start24, moreBtnMarker }
+  );
+
+  if (moreFoundResult.found) {
+    ctx.log('Variant J: found "+N more" button for slot — clicking to expand...');
+    // Click the "+N more" button via Playwright
+    await c.page.locator(`[${moreBtnMarker}]`).first().click({ timeout: 5000 });
+    // Remove the marker
+    await c.page.evaluate((attr: string) => {
+      document.querySelectorAll(`[${attr}]`).forEach((el: Element) => el.removeAttribute(attr));
+    }, moreBtnMarker);
+
+    // Wait for the popup/expanded card list to appear
+    await c.wait(600);
+
+    // Find and click the correct card in the expanded popup
+    const popupClickResult: { clicked: boolean; cardRole: string } = await c.page.evaluate(
+      ({ roleFilter, s24, s12, marker }: { roleFilter: string; s24: string; s12: string; marker: string }) => {
+        function collapse(t: string) { return t.replace(/\s+/g, ' ').trim(); }
+        function toMins(t: string): number {
+          const m24 = t.trim().match(/^(\d{1,2}):(\d{2})$/);
+          if (m24) return parseInt(m24[1], 10) * 60 + parseInt(m24[2], 10);
+          const m12 = t.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+          if (m12) {
+            let h = parseInt(m12[1], 10); const min = parseInt(m12[2], 10);
+            if (m12[3].toUpperCase() === 'PM' && h !== 12) h += 12;
+            if (m12[3].toUpperCase() === 'AM' && h === 12) h = 0;
+            return h * 60 + min;
+          }
+          return -1;
+        }
+        const targetMins = toMins(s24) >= 0 ? toMins(s24) : toMins(s12);
+
+        // Collect expanded card rows — each row has a role badge and a time span
+        // Look for elements that appeared after the popup: containers with a role badge span
+        // (class contains "rounded-full" and "w-fit") and a time span nearby
+        const roleBadgeSpans = Array.from(document.querySelectorAll(
+          'span[class*="rounded-full"][class*="w-fit"], span[class*="font-semibold"][class*="rounded-full"]'
+        )) as HTMLElement[];
+
+        // Group by card container — walk up to the flex-col container that holds name+badge+time
+        interface CardCandidate { container: HTMLElement; role: string; timeMins: number }
+        const candidates: CardCandidate[] = [];
+
+        for (const badgeSpan of roleBadgeSpans) {
+          const badgeText = collapse(badgeSpan.textContent ?? '');
+          if (!badgeText) continue;
+
+          // Walk up to find the card container (flex-col with gap-1)
+          let cardContainer: HTMLElement | null = badgeSpan.parentElement;
+          let depth = 0;
+          while (cardContainer && depth < 5) {
+            if (cardContainer.classList.contains('flex-col') || cardContainer.classList.contains('flex-1')) break;
+            cardContainer = cardContainer.parentElement;
+            depth++;
+          }
+          if (!cardContainer) continue;
+
+          // Find time span inside this container: "09:30" or sibling span with " - "
+          let cardTimeMins = -1;
+          for (const sp of Array.from(cardContainer.querySelectorAll('span')) as HTMLElement[]) {
+            const t = collapse(sp.textContent ?? '');
+            const parts = t.split(/\s*-\s*/);
+            if (parts.length >= 2) {
+              const m = toMins(parts[0].trim());
+              if (m === targetMins) { cardTimeMins = m; break; }
+            }
+            const m = toMins(t);
+            if (m === targetMins) { cardTimeMins = m; break; }
+          }
+          if (cardTimeMins < 0) continue;
+
+          // Deduplicate by container
+          if (candidates.some(c => c.container === cardContainer)) continue;
+          candidates.push({ container: cardContainer, role: badgeText, timeMins: cardTimeMins });
+        }
+
+        if (candidates.length === 0) return { clicked: false, cardRole: '' };
+
+        // Pick the card: if roleFilter given, match role badge (case-insensitive partial match)
+        let chosen: CardCandidate | undefined;
+        if (roleFilter) {
+          chosen = candidates.find(c =>
+            c.role.toLowerCase().includes(roleFilter.toLowerCase())
+          );
+        }
+        // Fallback: first card
+        if (!chosen) chosen = candidates[0];
+
+        // Walk up from chosen.container to find a clickable ancestor
+        let clickTarget: HTMLElement = chosen.container;
+        let cur: HTMLElement | null = chosen.container;
+        while (cur) {
+          if (cur.classList.contains('cursor-pointer') || cur.tagName === 'BUTTON') {
+            clickTarget = cur; break;
+          }
+          cur = cur.parentElement;
+        }
+
+        clickTarget.setAttribute(marker, '1');
+        return { clicked: true, cardRole: chosen.role };
+      },
+      { roleFilter, s24: start24, s12: start12, marker: MARKER }
+    );
+
+    if (popupClickResult.clicked) {
+      await c.wait(300);
+      try {
+        await c.page.locator(`[${MARKER}]`).first().click({ timeout: 5000 });
+      } finally {
+        await c.page.evaluate((m: string) => {
+          document.querySelectorAll(`[${m}]`).forEach((el: Element) => el.removeAttribute(m));
+        }, MARKER);
+      }
+      ctx.log(`Variant J: clicked expanded card — role: "${popupClickResult.cardRole}"`);
+      // Skip the main evaluate scan — we're done
+      const afterJ: string = await c.page.evaluate(() => document.body.innerText ?? '');
+      if (afterJ !== beforeSnapshot) {
+        ctx.log('Variant J: detail panel updated after expanded card click.');
+      }
+      if (weekdayVarName) ctx.setVariable(weekdayVarName, '');
+      if (dateVarName) ctx.setVariable(dateVarName, '');
+      return;
+    }
+    ctx.log('Variant J: could not identify card in expanded popup — falling through to main scan.');
+  }
 
   const clickResult: { clicked: boolean; matched: string; cardRole: string; weekday: string; date: string } = await c.page.evaluate(
     ({ f12, f24, s12, e12, s24, e24, marker, roleFilter }: {
