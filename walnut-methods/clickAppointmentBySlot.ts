@@ -682,10 +682,16 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           if (cur.classList.contains('cursor-pointer')) return cur;
           cur = cur.parentElement;
         }
-        // Fallback: walk up to find any div with w-full
+        // Fallback 1: walk up to find any div with w-full
         cur = el;
         while (cur) {
           if (cur.tagName === 'DIV' && cur.classList.contains('w-full')) return cur;
+          cur = cur.parentElement;
+        }
+        // Fallback 2: walk up to find a div.flex-col (Variant E3 card container)
+        cur = el;
+        while (cur) {
+          if (cur.tagName === 'DIV' && cur.classList.contains('flex-col')) return cur;
           cur = cur.parentElement;
         }
         return el;
@@ -813,7 +819,11 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           const text = collapse(span.textContent ?? '');
           if (isMatch(text)) {
             const target = findClickable(span);
-            if (target !== span) {
+            // Accept target even if it equals span — E3 cards have no cursor-pointer ancestor
+            // but findClickable will have walked up to div.flex-col as the clickable container.
+            // Only skip if target is still a bare <span> with no parent card structure found.
+            const isBareSspan = target === span && target.tagName === 'SPAN';
+            if (!isBareSspan) {
               const cardRole = extractCardRole(target);
               // Avoid duplicate if already found via <p> scan
               if (!matchedWeekColCards.some(m => m.target === target)) {
