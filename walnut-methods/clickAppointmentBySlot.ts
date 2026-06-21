@@ -2,7 +2,7 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Click Appointment By Slot
- * description: Click the appointment card matching $[selectedslot] with optional role filter ${role} and verify details changed
+ * description: Click the appointment card matching $[selectedslot] with optional role filter $[role] and verify details changed
  * actionType: custom_click_appointment_by_slot
  * context: web
  * needsLocator: false
@@ -286,7 +286,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
 
   const c = ctx as any;
   const slotVarName = ctx.args[0]; // e.g. "selectedslot"
-  const roleArg      = (ctx.args[1] as string | undefined ?? '').trim(); // e.g. "Doctor" or "Nurse" — typed directly by user (optional)
+  const roleVarName = ctx.args[1] as string | undefined; // e.g. "role" (optional)
   const weekdayVarName = ctx.args[2] as string | undefined; // e.g. "weekday" (optional output)
   const dateVarName    = ctx.args[3] as string | undefined; // e.g. "date" (optional output)
 
@@ -300,12 +300,11 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
     );
   }
 
-  // Role filter — provided as a plain local value (e.g. "Doctor", "Nurse").
-  // Empty string means no role filter; if a single card exists it is clicked regardless.
-  const roleFilter: string = roleArg;
+  // Read optional role filter — empty string / undefined means no role filter
+  const roleFilter: string = roleVarName ? ((ctx.getVariable(roleVarName) as string | undefined) ?? '').trim() : '';
 
   ctx.log(`Slot from $[${slotVarName}]: "${rawSlot}"`);
-  if (roleFilter) ctx.log(`Role filter: "${roleFilter}"`);
+  if (roleFilter) ctx.log(`Role filter from $[${roleVarName}]: "${roleFilter}"`);
 
   // ── Step 2: Normalize and build match candidates ───────────────────────────────────────────────
   // We need to handle:
