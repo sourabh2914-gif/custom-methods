@@ -493,23 +493,15 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       continue;
     }
 
-    // Use collectSlotsFromSection which:
-    //  1. clicks the tab (already done above, but collectSlotsFromSection is idempotent)
-    //  2. runs XPath scoped to VISIBLE buttons only (getBoundingClientRect check)
-    //  3. tries availableSlotXpath first, falls back to allSlotsXpath if nothing found
-    // The tab click above is redundant but harmless — collectSlotsFromSection will click again.
-    let visibleSlots = await collectSlotsFromSection(section, availableSlotXpath);
+    // Phase 2: use ONLY availableSlotXpath — excludes @disabled, cursor-not-allowed,
+    // opacity-50/40, line-through (booked/faded slots).
+    // Do NOT fall back to allSlotsXpath — it includes faded/booked slots and would
+    // cause Morning to always win, preventing the loop from reaching Afternoon/Evening.
+    const visibleSlots = await collectSlotsFromSection(section, availableSlotXpath);
     ctx.log(`Phase 2 available slots in "${section}": ${visibleSlots.length}`);
 
     if (visibleSlots.length === 0) {
-      // Fallback: try allSlotsXpath (includes @disabled buttons that are visually clickable)
-      ctx.log(`No slots via availableSlotXpath in "${section}" — retrying with allSlotsXpath`);
-      visibleSlots = await collectSlotsFromSection(section, allSlotsXpath);
-      ctx.log(`Phase 2 allSlots fallback in "${section}": ${visibleSlots.length}`);
-    }
-
-    if (visibleSlots.length === 0) {
-      ctx.log(`No slots found in "${section}" — moving to next section`);
+      ctx.log(`No clickable slots in "${section}" — moving to next section`);
       continue;
     }
 
