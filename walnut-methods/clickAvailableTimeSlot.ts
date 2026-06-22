@@ -73,28 +73,30 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
   //   Variant A: <button><span>Morning</span></button>
   //   Variant B: <button><img alt="Morning" ...>"Morning"</button>  (has <img>, text node alongside)
   //   Variant C: <button ...><span class="relative z-10">Afternoon</span><span ...>10</span></button>
-  // NOTE: Variant B uses `not(.//span)` was WRONG — Variant B may have spans too.
-  //   Instead detect Variant B by presence of <img> child alongside the label text.
+  //   Variant D: <button>🌙 Evening</button> or <button><svg .../>Evening</button> (icon + direct text)
   const findTabXpath = (label: string) =>
     `//button[` +
-      `.//span[normalize-space(text())='${label}']` +           // Variant A & C: span contains label
-      ` or (.//img and contains(normalize-space(.),'${label}'))` + // Variant B: img sibling + text node
+      `.//span[normalize-space(text())='${label}']` +                    // Variant A & C: span contains label
+      ` or (.//img and contains(normalize-space(.),'${label}'))` +       // Variant B: img sibling + text
+      ` or (not(.//span[contains(@class,'rounded')]) and contains(normalize-space(.),'${label}') and not(contains(normalize-space(.),':')) and not(contains(normalize-space(.),'-')))` + // Variant D: direct text, no slot-like content
     `]`;
 
   // XPath for clickable (non-disabled) slots only — used for the click action
   // Variant C slots: bg-white (available), no disabled attr, no cursor-not-allowed
   //   <button class="relative py-1.5 px-1 ... bg-white text-[#555] hover:bg-gray-50">12:00 – 12:30</button>
+  // Variant D slots (new DOM): rounded-full but no explicit cursor class — no @disabled, no cursor-not-allowed
   // Excludes already-selected/booked slots:
   //   - bg-blue-500 / bg-blue-600 / bg-blue-700 / bg-primary / bg-black / bg-gray-900 = selected state (A/B)
-  //   - bg-[#3279AD] / bg-[#...] arbitrary hex fills = selected state (Variant C custom color)
+  //   - bg-[#3279AD] = Variant C selected state (specific known hex)
   //   - opacity-50 / opacity-40 / line-through = visually booked/unavailable
-  //   - text-white on a colored bg = selected/active slot
+  // NOTE: removed the broad `not(contains(@class,'bg-[#'))` exclusion — it was incorrectly
+  //   blocking available slots in apps that use arbitrary hex classes on available buttons.
+  //   Only exclude the specific known selected-state hex `bg-[#3279AD]`.
   const availableSlotXpath =
     `//button[` +
       `not(@disabled)` +
       ` and not(contains(@class,'cursor-not-allowed'))` +
-      ` and (contains(@class,'cursor-pointer') or contains(@class,'bg-white') or contains(@class,'hover:bg-gray-50'))` +
-      ` and contains(normalize-space(text()),':')` +   // time slots contain ":" e.g. "10:00 AM" or "12:00"
+      ` and contains(normalize-space(.),':')` +        // time slots contain ":" e.g. "10:00 AM" or "12:00"
       ` and not(contains(@class,'flex-1'))` +          // exclude section tab buttons
       ` and not(contains(@class,'bg-blue-500'))` +     // exclude selected slots (Variant A/B selected state)
       ` and not(contains(@class,'bg-blue-600'))` +
@@ -105,14 +107,14 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       ` and not(contains(@class,'opacity-50'))` +      // exclude faded/booked slots
       ` and not(contains(@class,'opacity-40'))` +
       ` and not(contains(@class,'line-through'))` +    // exclude struck-through booked slots
-      ` and not(contains(@class,'bg-[#3279AD]'))` +    // exclude Variant C selected state (custom hex)
-      ` and not(contains(@class,'bg-[#'))` +           // exclude any arbitrary hex bg (selected/active fill)
+      ` and not(contains(@class,'bg-[#3279AD]'))` +    // exclude Variant C selected state (specific hex)
+      ` and (contains(@class,'rounded') or contains(@class,'bg-white') or contains(@class,'bg-gray') or contains(@class,'cursor-pointer') or contains(@class,'py-'))` + // must look like a slot button
     `]`;
 
   // XPath for ALL slots (faded/disabled included) — used for firstSlot/lastSlot capture
   const allSlotsXpath =
     `//button[` +
-      `contains(normalize-space(text()),':')` +        // time slots contain ":" e.g. "10:00 AM" or "12:00"
+      `contains(normalize-space(.),':')` +             // time slots contain ":" e.g. "10:00 AM" or "12:00" (. matches span-wrapped text too)
       ` and not(contains(@class,'flex-1'))` +          // exclude section tab buttons
       ` and (contains(@class,'cursor-pointer') or contains(@class,'cursor-not-allowed') or @disabled` +
       ` or contains(@class,'bg-white') or contains(@class,'bg-gray-50') or contains(@class,'rounded-full'))` +
@@ -247,12 +249,16 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
     return null;
   });
 
-  // Time filter always applies — skip slots whose start time is before current system time,
-  // regardless of whether the selected date is today or a future date.
-  // (isToday is kept for firstSlot/lastSlot logging only — it no longer gates the time filter)
+  // Time filter only applies when the selected date is TODAY.
+  // For future dates, all slots are valid regardless of current system time.
+  // Default to false (permissive) when date detection fails — better to show all slots than none.
   const isToday = selectedDay !== null ? selectedDay === todayDay : false;
   ctx.log(`Selected day in calendar: ${selectedDay ?? 'undetected'}, today: ${todayDay}, isToday: ${isToday}`);
-  ctx.log(`Time filter always ON — skipping slots with start time ≤ ${Math.floor(nowMinutes / 60)}:${String(nowMinutes % 60).padStart(2, '0')} (current system time)`);
+  if (isToday) {
+    ctx.log(`Time filter ON (today selected) — skipping slots with start time ≤ ${Math.floor(nowMinutes / 60)}:${String(nowMinutes % 60).padStart(2, '0')} (current system time)`);
+  } else {
+    ctx.log(`Time filter OFF — future date selected, all slots are valid`);
+  }
 
   /**
    * Parse a slot's start time from its label and return minutes-since-midnight, or null if unparseable.
@@ -381,10 +387,9 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       return texts;
     }, allSlotsXpath);
 
-    // Always filter by current system time — skip slots whose start time has already passed.
-    // This applies to ALL dates (today and future) because the app shows all slots for a given
-    // day regardless of current time, so a 9:30 AM slot on a future date is still in the past
-    // relative to 13:17 system time and must not be clicked.
+    // Only filter by current system time when TODAY is selected.
+    // For future dates, all slots are valid regardless of current system time.
+    if (!isToday) return rawSlots;
     return rawSlots.filter(text => {
       const startMin = parseSlotStartMinutes(text);
       if (startMin === null) return false;
@@ -487,8 +492,10 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       ctx.log(`Section "${section}" is already active`);
     }
 
-    // Collect ALL available (non-disabled) slots in this section
-    const allSlots: { text: string; index: number }[] = await c.page.evaluate((xp: string) => {
+    // Collect ALL available (non-disabled) slots in this section.
+    // For future dates, fall back to allSlotsXpath if availableSlotXpath returns nothing —
+    // some apps mark all slots with @disabled in the DOM even when they are visually clickable.
+    let allSlots: { text: string; index: number }[] = await c.page.evaluate((xp: string) => {
       const result = document.evaluate(xp, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
       const slots: { text: string; index: number }[] = [];
       for (let i = 0; i < result.snapshotLength; i++) {
@@ -500,28 +507,46 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       return slots;
     }, availableSlotXpath);
 
+    if (allSlots.length === 0 && !isToday) {
+      // Future date: retry with allSlotsXpath (captures disabled-but-visually-available slots)
+      ctx.log(`No slots via availableSlotXpath in "${section}" on future date — retrying with allSlotsXpath`);
+      allSlots = await c.page.evaluate((xp: string) => {
+        const result = document.evaluate(xp, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+        const slots: { text: string; index: number }[] = [];
+        for (let i = 0; i < result.snapshotLength; i++) {
+          const el = result.snapshotItem(i) as HTMLElement | null;
+          if (!el) continue;
+          const text = (el.textContent ?? '').trim();
+          if (text) slots.push({ text, index: i });
+        }
+        return slots;
+      }, allSlotsXpath);
+    }
+
     if (allSlots.length === 0) {
       ctx.log(`No available slots in "${section}" — moving to next section`);
       continue;
     }
 
-    // Always filter out past slots regardless of date (today or future).
-    // The app shows all slots for any given day; system time determines what's bookable.
-    const futureSlots = allSlots.filter(slot => {
-      const startMin = parseSlotStartMinutes(slot.text);
-      if (startMin === null) {
-        ctx.log(`Could not parse time from slot text "${slot.text}" — skipping`);
-        return false;
-      }
-      if (startMin <= nowMinutes) {
-        ctx.log(`Skipping past/current slot "${slot.text}" (start=${startMin} min, now=${nowMinutes} min)`);
-        return false;
-      }
-      return true;
-    });
+    // Only filter out past slots when TODAY is selected.
+    // For future dates, all slots are valid regardless of current system time.
+    const futureSlots = isToday
+      ? allSlots.filter(slot => {
+          const startMin = parseSlotStartMinutes(slot.text);
+          if (startMin === null) {
+            ctx.log(`Could not parse time from slot text "${slot.text}" — skipping`);
+            return false;
+          }
+          if (startMin <= nowMinutes) {
+            ctx.log(`Skipping past/current slot "${slot.text}" (start=${startMin} min, now=${nowMinutes} min)`);
+            return false;
+          }
+          return true;
+        })
+      : allSlots;
 
     if (futureSlots.length === 0) {
-      ctx.log(`All available slots in "${section}" are in the past — moving to next section`);
+      ctx.log(`All available slots in "${section}" are in the past (today-only filter) — moving to next section`);
       continue;
     }
 
@@ -546,9 +571,8 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
         ` and not(contains(@class,'opacity-50'))` +
         ` and not(contains(@class,'opacity-40'))` +
         ` and not(contains(@class,'line-through'))` +
-        ` and not(contains(@class,'bg-[#3279AD]'))` +  // exclude Variant C selected state
-        ` and not(contains(@class,'bg-[#'))` +         // exclude any arbitrary hex bg fill
-        ` and normalize-space(text())='${escapedText}'` +
+        ` and not(contains(@class,'bg-[#3279AD]'))` +  // exclude Variant C selected state (specific hex only)
+        ` and normalize-space(.)='${escapedText}'` +   // use . not text() to match span-wrapped text
       `]`;
 
     await c.page.locator(`xpath=${slotXpathByText}`).first().click();
@@ -569,7 +593,7 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
   throw new Error(
     `No bookable time slots found in Morning, Afternoon, or Evening. ` +
     `Either all slots are booked/disabled or all available slots are in the past ` +
-    `(current system time: ${Math.floor(nowMinutes / 60)}:${String(nowMinutes % 60).padStart(2, '0')}).`
-    + (isToday ? '' : ' Note: a future date was detected so time filter was disabled.')
+    `(current system time: ${Math.floor(nowMinutes / 60)}:${String(nowMinutes % 60).padStart(2, '0')}).` +
+    (isToday ? '' : ' Note: a future date was detected so time filter was disabled.')
   );
 }
