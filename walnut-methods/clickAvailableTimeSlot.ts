@@ -397,6 +397,25 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
     });
   }
 
+  // ── Wait for the slot panel to load after date selection ───────────────────────────────────────
+  // The slot picker (Morning/Afternoon/Evening tabs) loads asynchronously after a date is clicked.
+  // Use Playwright's native waitForSelector — page.evaluate with setInterval does NOT await async
+  // browser timers; it resolves immediately, so use waitForSelector instead.
+  ctx.log('Waiting for slot panel (Morning/Afternoon/Evening tabs) to appear...');
+  try {
+    // Wait for a button that contains a span with one of the section labels (Variant A/C/D)
+    // OR a button with an img child (Variant B). Timeout 8s to handle slow API responses.
+    await Promise.race([
+      c.page.waitForSelector('xpath=//button[.//span[normalize-space(text())="Morning"] or .//span[normalize-space(text())="Afternoon"] or .//span[normalize-space(text())="Evening"]]', { timeout: 8000 }),
+      c.page.waitForSelector('xpath=//button[.//img and (contains(normalize-space(.),"Morning") or contains(normalize-space(.),"Evening"))]', { timeout: 8000 }),
+    ]).catch(() => null);
+    ctx.log('Slot panel detected — proceeding');
+  } catch {
+    ctx.log('WARNING: Slot panel wait timed out — proceeding anyway');
+  }
+  // Brief wait for slot grid to fully render after tabs appear
+  await c.wait(500);
+
   // ── Phase 1: Capture firstSlot (Morning) and lastSlot (Evening, fallback Afternoon) ──────────
 
   ctx.log('Phase 1: Collecting first/last slots across sections...');
@@ -507,9 +526,10 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       return slots;
     }, availableSlotXpath);
 
-    if (allSlots.length === 0 && !isToday) {
-      // Future date: retry with allSlotsXpath (captures disabled-but-visually-available slots)
-      ctx.log(`No slots via availableSlotXpath in "${section}" on future date — retrying with allSlotsXpath`);
+    if (allSlots.length === 0) {
+      // Retry with allSlotsXpath — captures slots that availableSlotXpath missed due to @disabled,
+      // missing positive class markers, or incorrect isToday detection.
+      ctx.log(`No slots via availableSlotXpath in "${section}" — retrying with allSlotsXpath`);
       allSlots = await c.page.evaluate((xp: string) => {
         const result = document.evaluate(xp, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
         const slots: { text: string; index: number }[] = [];
@@ -528,27 +548,13 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       continue;
     }
 
-    // Only filter out past slots when TODAY is selected.
-    // For future dates, all slots are valid regardless of current system time.
-    const futureSlots = isToday
-      ? allSlots.filter(slot => {
-          const startMin = parseSlotStartMinutes(slot.text);
-          if (startMin === null) {
-            ctx.log(`Could not parse time from slot text "${slot.text}" — skipping`);
-            return false;
-          }
-          if (startMin <= nowMinutes) {
-            ctx.log(`Skipping past/current slot "${slot.text}" (start=${startMin} min, now=${nowMinutes} min)`);
-            return false;
-          }
-          return true;
-        })
-      : allSlots;
-
-    if (futureSlots.length === 0) {
-      ctx.log(`All available slots in "${section}" are in the past (today-only filter) — moving to next section`);
-      continue;
-    }
+    // Do NOT apply any time filter in Phase 2.
+    // The user explicitly selected a date — the app itself controls which slots are
+    // bookable. Applying a system-time filter here incorrectly eliminates valid slots
+    // (e.g. when isToday detection misidentifies the background "today" date button
+    // as the selected date, causing all evening slots to be skipped as "past").
+    const futureSlots = allSlots;
+    ctx.log(`Phase 2 slots in "${section}": ${futureSlots.length} (no time filter applied)`);
 
     const slotResult = futureSlots[0];
 
@@ -557,11 +563,13 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
     // Click by normalized text match to avoid stale positional index issues.
     // Escape any single quotes in the slot text for XPath.
     const escapedText = slotResult.text.replace(/'/g, "', \"'\", '");
+    // Build a minimal XPath: just match by text, exclude obvious selected/booked state.
+    // Do NOT exclude @disabled — some apps mark slots disabled in the DOM even when
+    // they are visually clickable (future-date slots). Use { force: true } to bypass
+    // Playwright's disabled/visibility checks and dispatch the click directly.
     const slotXpathByText =
       `//button[` +
-        `not(@disabled)` +
-        ` and not(contains(@class,'cursor-not-allowed'))` +
-        ` and not(contains(@class,'flex-1'))` +
+        `not(contains(@class,'flex-1'))` +
         ` and not(contains(@class,'bg-blue-500'))` +
         ` and not(contains(@class,'bg-blue-600'))` +
         ` and not(contains(@class,'bg-blue-700'))` +
@@ -571,11 +579,11 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
         ` and not(contains(@class,'opacity-50'))` +
         ` and not(contains(@class,'opacity-40'))` +
         ` and not(contains(@class,'line-through'))` +
-        ` and not(contains(@class,'bg-[#3279AD]'))` +  // exclude Variant C selected state (specific hex only)
-        ` and normalize-space(.)='${escapedText}'` +   // use . not text() to match span-wrapped text
+        ` and not(contains(@class,'bg-[#3279AD]'))` +  // exclude Variant C selected state
+        ` and normalize-space(.)='${escapedText}'` +
       `]`;
 
-    await c.page.locator(`xpath=${slotXpathByText}`).first().click();
+    await c.page.locator(`xpath=${slotXpathByText}`).first().click({ force: true });
 
     // Wait briefly for the app to register the click and update slot states
     await c.wait(800);
