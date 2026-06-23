@@ -23,8 +23,14 @@ export async function shareAndVerifyCount(ctx: WalnutContext) {
   if (!rawSelector)    throw new Error('countSelector (args[0]) is required.');
   if (!shareCountVar)  throw new Error('output variable $[shareCount] (args[1]) is required.');
 
-  // Resolve {{variableName}} placeholders inside the selector (e.g. {{BlogTitle}})
-  const countSelector: string = c.replacePlaceholders(rawSelector);
+  // Resolve both {{varName}} and $[varName] placeholders inside the selector
+  let countSelector: string = c.replacePlaceholders(rawSelector);
+  // Also resolve $[varName] runtime variable syntax by reading from variable context
+  countSelector = countSelector.replace(/\$\[([^\]]+)\]/g, (_: string, varName: string) => {
+    const value = c.getVariable(varName);
+    if (!value) throw new Error(`Runtime variable "$[${varName}]" is not set. Store it in an earlier step.`);
+    return value;
+  });
   c.log(`Resolved countSelector: ${countSelector}`);
 
   // Read the count — tries the element itself first, then its child <span>
