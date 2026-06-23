@@ -23,12 +23,17 @@ export async function shareAndVerifyCount(ctx: WalnutContext) {
   if (!countSelector) throw new Error('countSelector (args[0]) is required.');
   if (!shareCountVar) throw new Error('output variable $[shareCount] (args[1]) is required.');
 
-  // Use textContent via page.evaluate — reliable for dynamically rendered number spans
-  // where Playwright innerText may return empty string
+  // Read the count — tries the element itself first, then its child <span>
+  // (needed when countSelector points to a container div that has SVG + span inside,
+  // because the SVG's textContent makes the div's trimmed text return empty)
   const raw: string = await c.page.evaluate((xp: string) => {
     const result = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
     const node = result.singleNodeValue as Element | null;
-    return node ? (node.textContent ?? '').trim() : '';
+    if (!node) return '';
+    // Try the span child first (handles container divs with SVG + span)
+    const span = node.querySelector('span');
+    if (span) return (span.textContent ?? '').trim();
+    return (node.textContent ?? '').trim();
   }, countSelector);
 
   const match = raw.match(/\d+/);
