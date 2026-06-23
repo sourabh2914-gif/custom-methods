@@ -34,7 +34,7 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
   //   </div>
   //   Section tabs: <button class="flex-1 flex items-center ..."><img ...> Evening</button>  (img + text node)
   //
-  // Variant C — grid-cols-2 wrapper, 24-hour time format, bg-white for available slots:
+  //   Variant C — grid-cols-2 wrapper, 24-hour time format, bg-white for available slots:
   //   <div class="bg-[#F5F5F5] grid grid-cols-2 gap-2 p-3" style="position: relative; z-index: 1;">
   //     <button class="relative py-1.5 px-1 text-[11px] font-medium rounded-full ... bg-white text-[#555] hover:bg-gray-50">
   //       12:00 – 12:30
@@ -44,6 +44,17 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
   //     <span class="relative z-10">Afternoon</span>
   //     <span class="relative z-10 text-[9px] bg-[#3279AD] text-white rounded-full px-1.5">10</span>
   //   </button>
+  //
+  //   Variant E — div-based tabs (NOT button), grid-cols-3 slot grid, 24-hour time format:
+  //   Tab: <div class="flex gap-2 px-4 py-2 items-center rounded-t-xl cursor-pointer transition-colors text-gray-500 hover:bg-gray-100">
+  //           <svg .../><span class="font-medium text-[12px]">Morning</span>
+  //        </div>
+  //   Active tab: bg-[#F5F0E8] text-gray-800 on the div
+  //   Slots: <div class="rounded-b-3xl bg-[#F5F0E8] p-4 min-h-[100px] rounded-tl-3xl">
+  //            <div class="grid grid-cols-3 gap-2">
+  //              <button class="py-2 text-[11px] h-[30px] rounded-full font-medium transition-colors bg-white text-gray-600 hover:bg-gray-100">17:00 – 17:30</button>
+  //            </div>
+  //          </div>
   //
   // Available (clickable) slot = button NOT disabled, NOT cursor-not-allowed
   //                              has cursor-pointer (A/B) OR bg-white/hover:bg-gray-50 (C)
@@ -73,49 +84,65 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
   //   Variant A: <button><span>Morning</span></button>
   //   Variant B: <button><img alt="Morning" ...>"Morning"</button>  (has <img>, text node alongside)
   //   Variant C: <button ...><span class="relative z-10">Afternoon</span><span ...>10</span></button>
-  // NOTE: Variant B uses `not(.//span)` was WRONG — Variant B may have spans too.
-  //   Instead detect Variant B by presence of <img> child alongside the label text.
+  //   Variant D: <button>🌙 Evening</button> or <button><svg .../>Evening</button> (icon + direct text)
+  //   Variant E: <div class="flex gap-2 px-4 py-2 ... cursor-pointer ..."><svg .../><span class="font-medium text-[12px]">Morning</span></div>
+  //              (tabs are <div> elements, NOT <button>, with SVG icon + span label)
   const findTabXpath = (label: string) =>
-    `//button[` +
-      `.//span[normalize-space(text())='${label}']` +           // Variant A & C: span contains label
-      ` or (.//img and contains(normalize-space(.),'${label}'))` + // Variant B: img sibling + text node
+    `//*[` +
+      `(self::button or (self::div and contains(@class,'cursor-pointer')))` +  // Variant A-D: button; Variant E: clickable div
+      ` and (` +
+        `.//span[normalize-space(text())='${label}']` +                    // Variant A, C, E: span contains label
+        ` or (.//img and contains(normalize-space(.),'${label}'))` +       // Variant B: img sibling + text
+        ` or (not(.//span[contains(@class,'rounded')]) and contains(normalize-space(.),'${label}') and not(contains(normalize-space(.),':')) and not(contains(normalize-space(.),'–')) and not(contains(normalize-space(.), ' - ')))` + // Variant D: direct text, no slot-like range
+      `)` +
     `]`;
 
   // XPath for clickable (non-disabled) slots only — used for the click action
   // Variant C slots: bg-white (available), no disabled attr, no cursor-not-allowed
   //   <button class="relative py-1.5 px-1 ... bg-white text-[#555] hover:bg-gray-50">12:00 – 12:30</button>
+  // Variant D slots (new DOM): rounded-full but no explicit cursor class — no @disabled, no cursor-not-allowed
   // Excludes already-selected/booked slots:
   //   - bg-blue-500 / bg-blue-600 / bg-blue-700 / bg-primary / bg-black / bg-gray-900 = selected state (A/B)
-  //   - bg-[#3279AD] / bg-[#...] arbitrary hex fills = selected state (Variant C custom color)
+  //   - bg-[#3279AD] = Variant C selected state (specific known hex)
   //   - opacity-50 / opacity-40 / line-through = visually booked/unavailable
-  //   - text-white on a colored bg = selected/active slot
+  // NOTE: removed the broad `not(contains(@class,'bg-[#'))` exclusion — it was incorrectly
+  //   blocking available slots in apps that use arbitrary hex classes on available buttons.
+  //   Only exclude the specific known selected-state hex `bg-[#3279AD]`.
   const availableSlotXpath =
     `//button[` +
       `not(@disabled)` +
       ` and not(contains(@class,'cursor-not-allowed'))` +
-      ` and (contains(@class,'cursor-pointer') or contains(@class,'bg-white') or contains(@class,'hover:bg-gray-50'))` +
-      ` and contains(normalize-space(text()),':')` +   // time slots contain ":" e.g. "10:00 AM" or "12:00"
+      ` and contains(normalize-space(.),':')` +        // time slots contain ":"
+      ` and (contains(normalize-space(.), '–') or contains(normalize-space(.), ' - '))` + // must be a range, not a single time label
       ` and not(contains(@class,'flex-1'))` +          // exclude section tab buttons
-      ` and not(contains(@class,'bg-blue-500'))` +     // exclude selected slots (Variant A/B selected state)
+      ` and not(contains(@class,'bg-blue-500'))` +     // exclude selected slots
       ` and not(contains(@class,'bg-blue-600'))` +
       ` and not(contains(@class,'bg-blue-700'))` +
       ` and not(contains(@class,'bg-primary'))` +
       ` and not(contains(@class,'bg-black'))` +
       ` and not(contains(@class,'bg-gray-900'))` +
-      ` and not(contains(@class,'opacity-50'))` +      // exclude faded/booked slots
+      ` and not(contains(@class,'opacity-50'))` +      // exclude faded/past slots (for click target only)
       ` and not(contains(@class,'opacity-40'))` +
-      ` and not(contains(@class,'line-through'))` +    // exclude struck-through booked slots
-      ` and not(contains(@class,'bg-[#3279AD]'))` +    // exclude Variant C selected state (custom hex)
-      ` and not(contains(@class,'bg-[#'))` +           // exclude any arbitrary hex bg (selected/active fill)
+      ` and not(contains(@class,'line-through'))` +
+      ` and not(contains(@class,'bg-[#3279AD]'))` +
     `]`;
 
-  // XPath for ALL slots (faded/disabled included) — used for firstSlot/lastSlot capture
+  // XPath for ALL slots (faded/disabled included) — used for firstSlot/lastSlot capture.
+  // Key insight: time SLOT buttons always show a RANGE e.g. "09:00 AM – 09:30 AM" or "12:00 – 12:30".
+  // Calendar row-header buttons show only a single time ("7:30 PM") and must be excluded.
+  // We detect a range by requiring either an en-dash (– U+2013) or a hyphen-minus (-).
   const allSlotsXpath =
     `//button[` +
-      `contains(normalize-space(text()),':')` +        // time slots contain ":" e.g. "10:00 AM" or "12:00"
+      `contains(normalize-space(.),':')` +             // time slots contain ":"
+      ` and (contains(normalize-space(.), '–') or contains(normalize-space(.), ' - '))` + // must be a range (e.g. "09:00 AM – 09:30 AM"), not a single time label
       ` and not(contains(@class,'flex-1'))` +          // exclude section tab buttons
-      ` and (contains(@class,'cursor-pointer') or contains(@class,'cursor-not-allowed') or @disabled` +
-      ` or contains(@class,'bg-white') or contains(@class,'bg-gray-50') or contains(@class,'rounded-full'))` +
+      ` and not(contains(@class,'bg-blue-500'))` +     // exclude selected/nav buttons
+      ` and not(contains(@class,'bg-blue-600'))` +
+      ` and not(contains(@class,'bg-blue-700'))` +
+      ` and not(contains(@class,'bg-primary'))` +
+      ` and not(contains(@class,'bg-black'))` +
+      ` and not(contains(@class,'bg-gray-900'))` +
+      ` and not(contains(@class,'bg-[#3279AD]'))` +
     `]`;
 
   // Current system time in minutes-since-midnight (used to skip past slots for TODAY only)
@@ -247,12 +274,16 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
     return null;
   });
 
-  // Time filter always applies — skip slots whose start time is before current system time,
-  // regardless of whether the selected date is today or a future date.
-  // (isToday is kept for firstSlot/lastSlot logging only — it no longer gates the time filter)
+  // Time filter only applies when the selected date is TODAY.
+  // For future dates, all slots are valid regardless of current system time.
+  // Default to false (permissive) when date detection fails — better to show all slots than none.
   const isToday = selectedDay !== null ? selectedDay === todayDay : false;
   ctx.log(`Selected day in calendar: ${selectedDay ?? 'undetected'}, today: ${todayDay}, isToday: ${isToday}`);
-  ctx.log(`Time filter always ON — skipping slots with start time ≤ ${Math.floor(nowMinutes / 60)}:${String(nowMinutes % 60).padStart(2, '0')} (current system time)`);
+  if (isToday) {
+    ctx.log(`Time filter ON (today selected) — skipping slots with start time ≤ ${Math.floor(nowMinutes / 60)}:${String(nowMinutes % 60).padStart(2, '0')} (current system time)`);
+  } else {
+    ctx.log(`Time filter OFF — future date selected, all slots are valid`);
+  }
 
   /**
    * Parse a slot's start time from its label and return minutes-since-midnight, or null if unparseable.
@@ -287,52 +318,64 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
   }
 
   /**
-   * Activate a section tab and collect ALL slots (faded + unfaded) with NO time filter.
-   * Used exclusively for Morning firstSlot capture — even if morning has already passed.
+   * Click a section tab and collect slots from it.
+   * Slots are scoped to the VISIBLE slot panel only — not global XPath across the whole page.
+   * This prevents cross-section contamination when all three panels are in the DOM simultaneously.
+   *
+   * @param section  The tab label ('Morning', 'Afternoon', 'Evening')
+   * @param xpath    The slot XPath to evaluate (allSlotsXpath or availableSlotXpath)
+   * @returns        Array of slot text labels in DOM order, or [] if tab not found
    */
-  async function collectAllSlotsInSection(section: string): Promise<string[]> {
+  async function collectSlotsFromSection(section: string, xpath: string): Promise<string[]> {
     const tabXpath = findTabXpath(section);
 
-    const tabState: { exists: boolean; isDisabled: boolean; isActive: boolean } =
-      await c.page.evaluate((xp: string) => {
-        const result = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
-        const el = result.singleNodeValue as HTMLElement | null;
-        if (!el) return { exists: false, isDisabled: false, isActive: false };
-        const isDisabled = el.hasAttribute('disabled');
-        const classes = el.className || '';
-        const isActive =
-          classes.includes('font-bold') ||
-          classes.includes('border-b') ||
-          (classes.includes('text-gray-900') && !classes.includes('text-gray-400')) ||
-          // Variant B/C: flex-1 tab is active only if NOT muted (text-gray-400 or text-[#aaa])
-          (classes.includes('flex-1') &&
-            !classes.includes('text-gray-400') &&
-            !classes.includes('text-[#aaa]') &&
-            !classes.includes('[#aaa]'));
-        return { exists: true, isDisabled, isActive };
-      }, tabXpath);
+    // Check tab exists and get the tab element reference
+    const tabExists = await c.page.evaluate((xp: string) => {
+      const r = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+      const el = r.singleNodeValue as HTMLElement | null;
+      if (!el) return false;
+      if (el.hasAttribute('disabled')) return false;
+      return true;
+    }, tabXpath);
 
-    if (!tabState.exists || tabState.isDisabled) return [];
+    if (!tabExists) return [];
 
-    if (!tabState.isActive) {
-      await c.page.locator(`xpath=${tabXpath}`).first().click();
-      await c.wait(600);
-    }
+    // Always click the tab to make it active — this ensures the correct slot grid is visible.
+    // Clicking an already-active tab is harmless (it re-renders the same content).
+    await c.page.locator(`xpath=${tabXpath}`).first().click();
+    await c.wait(700);
 
+    // Collect slots using page.evaluate with the provided XPath.
+    // IMPORTANT: This XPath runs after the tab click, so only the active section's slots
+    // are in the visible DOM. All three panels render simultaneously in some apps (hidden
+    // via CSS), so we add a visibility check: only count buttons that are actually visible.
     const rawSlots: string[] = await c.page.evaluate((xp: string) => {
       const result = document.evaluate(xp, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
       const texts: string[] = [];
       for (let i = 0; i < result.snapshotLength; i++) {
         const el = result.snapshotItem(i) as HTMLElement | null;
         if (!el) continue;
+        // Only include slots that are currently visible (not hidden by CSS tab switching)
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) continue;
+        // Also check CSS visibility / display
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
         const text = (el.textContent ?? '').trim();
         if (text) texts.push(text);
       }
       return texts;
-    }, allSlotsXpath);
+    }, xpath);
 
-    // No time filter — return all slots as-is
     return rawSlots;
+  }
+
+  /**
+   * Activate Morning tab and collect ALL slots (faded + unfaded) with NO time filter.
+   * Used for firstSlot capture.
+   */
+  async function collectAllSlotsInSection(section: string): Promise<string[]> {
+    return collectSlotsFromSection(section, allSlotsXpath);
   }
 
   /**
@@ -340,57 +383,38 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
    * Returns the list of slot texts (in DOM order), or empty array if tab not found / disabled.
    */
   async function collectAllFutureSlotsInSection(section: string): Promise<string[]> {
-    // Note: isToday is captured from the outer scope
-    const tabXpath = findTabXpath(section);
-
-    const tabState: { exists: boolean; isDisabled: boolean; isActive: boolean } =
-      await c.page.evaluate((xp: string) => {
-        const result = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
-        const el = result.singleNodeValue as HTMLElement | null;
-        if (!el) return { exists: false, isDisabled: false, isActive: false };
-        const isDisabled = el.hasAttribute('disabled');
-        const classes = el.className || '';
-        const isActive =
-          classes.includes('font-bold') ||
-          classes.includes('border-b') ||
-          (classes.includes('text-gray-900') && !classes.includes('text-gray-400')) ||
-          // Variant B/C: flex-1 tab is active only if NOT muted (text-gray-400 or text-[#aaa])
-          (classes.includes('flex-1') &&
-            !classes.includes('text-gray-400') &&
-            !classes.includes('text-[#aaa]') &&
-            !classes.includes('[#aaa]'));
-        return { exists: true, isDisabled, isActive };
-      }, tabXpath);
-
-    if (!tabState.exists || tabState.isDisabled) return [];
-
-    if (!tabState.isActive) {
-      await c.page.locator(`xpath=${tabXpath}`).first().click();
-      await c.wait(600);
-    }
-
-    const rawSlots: string[] = await c.page.evaluate((xp: string) => {
-      const result = document.evaluate(xp, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-      const texts: string[] = [];
-      for (let i = 0; i < result.snapshotLength; i++) {
-        const el = result.snapshotItem(i) as HTMLElement | null;
-        if (!el) continue;
-        const text = (el.textContent ?? '').trim();
-        if (text) texts.push(text);
-      }
-      return texts;
-    }, allSlotsXpath);
-
-    // Always filter by current system time — skip slots whose start time has already passed.
-    // This applies to ALL dates (today and future) because the app shows all slots for a given
-    // day regardless of current time, so a 9:30 AM slot on a future date is still in the past
-    // relative to 13:17 system time and must not be clicked.
+    const rawSlots = await collectSlotsFromSection(section, allSlotsXpath);
+    // Only filter by current system time when TODAY is selected.
+    // For future dates, all slots are valid regardless of current system time.
+    if (!isToday) return rawSlots;
     return rawSlots.filter(text => {
       const startMin = parseSlotStartMinutes(text);
       if (startMin === null) return false;
       return startMin > nowMinutes;
     });
   }
+
+  // ── Wait for the slot panel to load after date selection ───────────────────────────────────────
+  // The slot picker (Morning/Afternoon/Evening tabs) loads asynchronously after a date is clicked.
+  // Use Playwright's native waitForSelector — page.evaluate with setInterval does NOT await async
+  // browser timers; it resolves immediately, so use waitForSelector instead.
+  ctx.log('Waiting for slot panel (Morning/Afternoon/Evening tabs) to appear...');
+  try {
+    // Wait for any tab label to appear — covers all DOM variants:
+    //   Variant A/B/C/D: <button>...<span>Morning</span>...</button>
+    //   Variant E:       <div class="... cursor-pointer ..."><svg/><span>Morning</span></div>
+    await Promise.race([
+      // Variant A/C/D/E: any element containing span with section label
+      c.page.waitForSelector('xpath=//*[.//span[normalize-space(text())="Morning"] or .//span[normalize-space(text())="Afternoon"] or .//span[normalize-space(text())="Evening"]]', { timeout: 8000 }),
+      // Variant B: button with img child
+      c.page.waitForSelector('xpath=//button[.//img and (contains(normalize-space(.),"Morning") or contains(normalize-space(.),"Evening"))]', { timeout: 8000 }),
+    ]).catch(() => null);
+    ctx.log('Slot panel detected — proceeding');
+  } catch {
+    ctx.log('WARNING: Slot panel wait timed out — proceeding anyway');
+  }
+  // Brief wait for slot grid to fully render after tabs appear
+  await c.wait(500);
 
   // ── Phase 1: Capture firstSlot (Morning) and lastSlot (Evening, fallback Afternoon) ──────────
 
@@ -410,13 +434,15 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
   // firstSlot = first slot in Morning (faded or unfaded), no time filter
   const firstSlotText = morningSlotsRaw.length > 0 ? morningSlotsRaw[0] : null;
 
-  // lastSlot = last future slot in Evening; if none, fallback to last in Afternoon
+  // lastSlot = last slot in Evening; if none, last in Afternoon; if none, last in Morning
   const lastSlotText =
     eveningSlotsAll.length > 0
       ? eveningSlotsAll[eveningSlotsAll.length - 1]
       : afternoonSlotsAll.length > 0
         ? afternoonSlotsAll[afternoonSlotsAll.length - 1]
-        : null;
+        : morningSlotsRaw.length > 0
+          ? morningSlotsRaw[morningSlotsRaw.length - 1]
+          : null;
 
   if (firstSlotText && firstSlotVar) {
     ctx.setVariable(firstSlotVar, firstSlotText);
@@ -451,21 +477,10 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
         const isDisabled = el.hasAttribute('disabled');
         const classes = el.className || '';
 
-        // Active tab signals across all variants:
-        //   Variant A: font-bold (active) vs font-normal (inactive)
-        //   Variant B: border-b, text-gray-900, or absence of text-gray-400 (muted = inactive)
-        //   Variant C: flex-1 tabs — active = no muted color (text-[#aaa]), inactive = text-[#aaa]
-        const isActive =
-          classes.includes('font-bold') ||
-          classes.includes('border-b') ||
-          (classes.includes('text-gray-900') && !classes.includes('text-gray-400')) ||
-          // Variant B/C: flex-1 tab is active only if NOT muted (text-gray-400 or text-[#aaa])
-          (classes.includes('flex-1') &&
-            !classes.includes('text-gray-400') &&
-            !classes.includes('text-[#aaa]') &&
-            !classes.includes('[#aaa]'));
-
-        return { exists: true, isDisabled, isActive };
+        // Active tab detection — just check it exists; always click to ensure it's active.
+        // isActive detection is unreliable across variants, so we always click the tab
+        // and wait for it to render its slots.
+        return { exists: true, isDisabled, isActive: false };
       }, tabXpath);
 
     if (!tabState.exists) {
@@ -478,52 +493,20 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
       continue;
     }
 
-    // Activate the tab if not already active
-    if (!tabState.isActive) {
-      ctx.log(`Clicking "${section}" tab to activate it...`);
-      await c.page.locator(`xpath=${tabXpath}`).first().click();
-      await c.wait(600);
-    } else {
-      ctx.log(`Section "${section}" is already active`);
-    }
+    // Phase 2: use ONLY availableSlotXpath — excludes @disabled, cursor-not-allowed,
+    // opacity-50/40, line-through (booked/faded slots).
+    // Do NOT fall back to allSlotsXpath — it includes faded/booked slots and would
+    // cause Morning to always win, preventing the loop from reaching Afternoon/Evening.
+    const visibleSlots = await collectSlotsFromSection(section, availableSlotXpath);
+    ctx.log(`Phase 2 available slots in "${section}": ${visibleSlots.length}`);
 
-    // Collect ALL available (non-disabled) slots in this section
-    const allSlots: { text: string; index: number }[] = await c.page.evaluate((xp: string) => {
-      const result = document.evaluate(xp, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-      const slots: { text: string; index: number }[] = [];
-      for (let i = 0; i < result.snapshotLength; i++) {
-        const el = result.snapshotItem(i) as HTMLElement | null;
-        if (!el) continue;
-        const text = (el.textContent ?? '').trim();
-        if (text) slots.push({ text, index: i });
-      }
-      return slots;
-    }, availableSlotXpath);
-
-    if (allSlots.length === 0) {
-      ctx.log(`No available slots in "${section}" — moving to next section`);
+    if (visibleSlots.length === 0) {
+      ctx.log(`No clickable slots in "${section}" — moving to next section`);
       continue;
     }
 
-    // Always filter out past slots regardless of date (today or future).
-    // The app shows all slots for any given day; system time determines what's bookable.
-    const futureSlots = allSlots.filter(slot => {
-      const startMin = parseSlotStartMinutes(slot.text);
-      if (startMin === null) {
-        ctx.log(`Could not parse time from slot text "${slot.text}" — skipping`);
-        return false;
-      }
-      if (startMin <= nowMinutes) {
-        ctx.log(`Skipping past/current slot "${slot.text}" (start=${startMin} min, now=${nowMinutes} min)`);
-        return false;
-      }
-      return true;
-    });
-
-    if (futureSlots.length === 0) {
-      ctx.log(`All available slots in "${section}" are in the past — moving to next section`);
-      continue;
-    }
+    const futureSlots = visibleSlots.map((text, index) => ({ text, index }));
+    ctx.log(`Phase 2 slots in "${section}": ${futureSlots.length} (visibility-scoped, no time filter)`);
 
     const slotResult = futureSlots[0];
 
@@ -532,11 +515,13 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
     // Click by normalized text match to avoid stale positional index issues.
     // Escape any single quotes in the slot text for XPath.
     const escapedText = slotResult.text.replace(/'/g, "', \"'\", '");
+    // Build a minimal XPath: just match by text, exclude obvious selected/booked state.
+    // Do NOT exclude @disabled — some apps mark slots disabled in the DOM even when
+    // they are visually clickable (future-date slots). Use { force: true } to bypass
+    // Playwright's disabled/visibility checks and dispatch the click directly.
     const slotXpathByText =
       `//button[` +
-        `not(@disabled)` +
-        ` and not(contains(@class,'cursor-not-allowed'))` +
-        ` and not(contains(@class,'flex-1'))` +
+        `not(contains(@class,'flex-1'))` +
         ` and not(contains(@class,'bg-blue-500'))` +
         ` and not(contains(@class,'bg-blue-600'))` +
         ` and not(contains(@class,'bg-blue-700'))` +
@@ -547,11 +532,10 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
         ` and not(contains(@class,'opacity-40'))` +
         ` and not(contains(@class,'line-through'))` +
         ` and not(contains(@class,'bg-[#3279AD]'))` +  // exclude Variant C selected state
-        ` and not(contains(@class,'bg-[#'))` +         // exclude any arbitrary hex bg fill
-        ` and normalize-space(text())='${escapedText}'` +
+        ` and normalize-space(.)='${escapedText}'` +
       `]`;
 
-    await c.page.locator(`xpath=${slotXpathByText}`).first().click();
+    await c.page.locator(`xpath=${slotXpathByText}`).first().click({ force: true });
 
     // Wait briefly for the app to register the click and update slot states
     await c.wait(800);
@@ -569,7 +553,7 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
   throw new Error(
     `No bookable time slots found in Morning, Afternoon, or Evening. ` +
     `Either all slots are booked/disabled or all available slots are in the past ` +
-    `(current system time: ${Math.floor(nowMinutes / 60)}:${String(nowMinutes % 60).padStart(2, '0')}).`
-    + (isToday ? '' : ' Note: a future date was detected so time filter was disabled.')
+    `(current system time: ${Math.floor(nowMinutes / 60)}:${String(nowMinutes % 60).padStart(2, '0')}).` +
+    (isToday ? '' : ' Note: a future date was detected so time filter was disabled.')
   );
 }

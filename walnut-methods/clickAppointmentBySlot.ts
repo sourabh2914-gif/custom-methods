@@ -236,11 +236,43 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   //   the one whose <span class="text-[9px] font-bold ... rounded-full"> badge text matches the
   //   role (case-insensitive) is preferred. If role is unset or no match, the first card is used.
   //
-  // Detection strategy:
+  // ── Variant G — Week-view grid with data-card count badges (pixel-top time encoding) ──────────
+  //   Column container:
+  //     <div class="flex-1 relative bg-white"
+  //          style="min-width: 140px; height: 3840px; border-right: 1px solid rgb(229,231,235);">
+  //       ...
+  //     </div>
+  //   Slot card:
+  //     <div data-card="1"
+  //          class="absolute left-0 right-0 z-10 flex items-center justify-center cursor-pointer
+  //                 hover:bg-blue-50/60 transition-colors"
+  //          style="top: 1600px; height: 80px;">
+  //       <span class="text-lg font-bold text-btn-primary">1</span>
+  //     </div>
+  //   The time is NOT stored as text — it is encoded as the CSS `top` pixel offset.
+  //   From the DOM screenshot data points:
+  //     6:30 PM  →  top: 1600px
+  //     7:30 PM  →  top: 1920px
+  //     8:00 PM  →  top: 2080px   (Tuesday column)
+  //     2:40 PM  →  top: 2960px   (computed)
+  //     3:20 PM  →  top: 3120px   (computed)
+  //   These establish: 320 px = 60 min → px/min = 16/3.
+  //   Reference anchor: 6:30 PM = 1110 min from midnight → top = 1600
+  //     → offset = 1110 − (1600 × 3 / 16) = 810 min from midnight (= 13:30)
+  //   Formula: top_px = (totalMinutes − 810) × (16 / 3)
+  //   Match strategy:
+  //     1. Compute expected top_px from the slot's start time.
+  //     2. Find all [data-card] elements.
+  //     3. Click the one whose parsed `top` is within ±20 px of the expected value.
+  //   The column header above each column carries the weekday/date (same structure as Variant F).
+  //
+  //   Detection strategy:
   //   - Variant A/B/C: scan all <p> elements, match full time range text, walk up to cursor-pointer div
   //   - Variant D: find row whose two time <span> labels match start+end of target slot,
   //                then click the cursor-pointer card div in that same row
   //   - Variant E: scan data-apt-card elements, check all <span> texts for time match
+  //   - Variant G: find [data-card] elements, match by computed pixel top offset from slot time
+  //   - Variant H: find flex cursor-pointer rows whose flex-shrink-0 time-label div matches slot start time
   //   - Cross-format: both 12h and 24h candidates always tried (full12 + full24)
   //   - All matching uses equality (never partial includes) to avoid adjacent-slot false positives
   //   - Role filter: when multiple cards share a slot, $[role] selects the correct card
@@ -417,32 +449,49 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
       return best;
     }
 
-    // ── Strategy A: find a rendered time-label SPAN (leaf, exact match) and scroll to it ─────────
-    // The calendar renders hour/half-hour labels in spans like "9 AM", "9:30 AM", "12 PM" etc.
-    // We use ONLY spans (not divs) with exact time-label text to avoid false matches on
-    // composite divs whose textContent aggregates multiple labels.
-    const labelSpans = Array.from(document.querySelectorAll('span')) as HTMLElement[];
+    // ── Strategy A: find a rendered time-label element (span or div leaf) and scroll to it ────────
+    // Most calendar variants render hour/half-hour labels in <span> elements.
+    // Variant H renders them in <div class="flex-shrink-0 ..."> divs whose direct textContent
+    // is the time (e.g. "6:30 PM"). We scan both span and div leaf elements so the pre-scroll
+    // works for all DOM variants.
+    const labelCandidates = Array.from(document.querySelectorAll('span, div')) as HTMLElement[];
     let bestLabelEl: HTMLElement | null = null;
     let bestDiff = Infinity;
 
-    for (const span of labelSpans) {
-      // Must be a leaf or near-leaf (textContent === own text)
-      const text = (span.textContent ?? '').trim();
-      if (!text || text.length > 12) continue; // time labels are short
+    for (const el of labelCandidates) {
+      // Only leaf or near-leaf elements — skip parents that aggregate multiple labels
+      const text = (el.textContent ?? '').trim();
+      if (!text || text.length > 12) continue; // time labels are short (e.g. "7:30 PM" = 7 chars)
       const mins = toMinutes(text);
       if (mins < 0) continue;
       const diff = Math.abs(mins - targetMins);
       if (diff < bestDiff) {
         bestDiff = diff;
-        bestLabelEl = span;
+        bestLabelEl = el;
       }
     }
 
-    if (bestLabelEl && bestDiff <= 60) {
-      // Found a time label within 60 min of target — scroll it to the top of the viewport
-      // so the card for that slot (which starts AT the label and extends downward) is visible.
-      // Use 'start' not 'center' — 'center' puts the label mid-screen but the card body is below.
-      bestLabelEl.scrollIntoView({ behavior: 'instant', block: 'start' });
+    if (bestLabelEl) {
+      // Found the nearest time label — scroll it into view via its own scroll container first
+      // (handles both modal scroll containers and page-level calendars).
+      // Try scrolling via the scroll container for precision; fall back to scrollIntoView.
+      const scrollParentA = (function findSP(el: HTMLElement): HTMLElement | null {
+        let cur = el.parentElement;
+        while (cur && cur !== document.body) {
+          const ov = window.getComputedStyle(cur).overflowY;
+          if ((ov === 'scroll' || ov === 'auto') && cur.scrollHeight > cur.clientHeight) return cur;
+          cur = cur.parentElement;
+        }
+        return null;
+      })(bestLabelEl);
+      if (scrollParentA) {
+        const pRect = scrollParentA.getBoundingClientRect();
+        const eRect = bestLabelEl.getBoundingClientRect();
+        const elRelTop = eRect.top - pRect.top + scrollParentA.scrollTop;
+        scrollParentA.scrollTop = Math.max(0, elRelTop - 100); // 100px top margin
+      } else {
+        bestLabelEl.scrollIntoView({ behavior: 'instant', block: 'start' });
+      }
       return;
     }
 
@@ -453,12 +502,12 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
 
     // Try to detect px-per-hour from the DOM by finding two time labels with known positions
     const timeLabels: { mins: number; top: number }[] = [];
-    for (const span of labelSpans) {
-      const text = (span.textContent ?? '').trim();
+    for (const el of labelCandidates) {
+      const text = (el.textContent ?? '').trim();
       if (!text || text.length > 12) continue;
       const mins = toMinutes(text);
       if (mins < 0) continue;
-      const rect = span.getBoundingClientRect();
+      const rect = el.getBoundingClientRect();
       const containerRect = scrollContainer.getBoundingClientRect();
       const relTop = rect.top - containerRect.top + scrollContainer.scrollTop;
       timeLabels.push({ mins, top: relTop });
@@ -559,6 +608,226 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   // Wait for modal scroll to settle before running the querySelector scan
   await c.wait(400);
 
+  // ── Variant J: collapsed slot with "+N more" button ──────────────────────────────────────────
+  // When multiple cards share a time slot the calendar collapses them into one visible card plus
+  // a "+N more" button:
+  //   <button class="w-full flex-shrink-0 flex items-center justify-center gap-1 py-1
+  //                  border-t border-gray-200 text-[10px] font-semibold text-gray-500
+  //                  hover:bg-gray-50 hover:text-gray-800 transition-colors">
+  //     "+" "1" " more"
+  //   </button>
+  //
+  // Strategy:
+  //   1. Scan all visible "+N more" buttons near a card whose time matches the target slot.
+  //   2. If found, click it via Playwright (triggers a popup/expansion showing all cards).
+  //   3. Wait for the popup to appear.
+  //   4. Inside the popup, find the card whose role badge matches roleFilter; click it.
+  //   5. If no roleFilter, click the first expanded card.
+  //
+  // The expanded popup contains card rows like:
+  //   <div class="flex flex-col gap-1 min-w-0 flex-1">
+  //     <span class="text-sm font-semibold text-gray-900 truncate">Dr. Johnc Smith</span>
+  //     <span class="text-[10px] font-semibold px-2 py-0.5 rounded-full w-fit"
+  //           style="background-color: rgb(240,253,244); color: rgb(21,128,61);">
+  //       MD New Patient-Oncology
+  //     </span>
+  //     <div class="flex items-center gap-1 text-xs text-gray-400">
+  //       <svg ...></svg>
+  //       <span>"09:30" " - " "10:00"</span>
+  //     </div>
+  //   </div>
+  //
+  // Time in popup is "HH:MM" 24h (no AM/PM), separator " - " (hyphen).
+  // Role is in the badge span (text-[10px] font-semibold px-2 py-0.5 rounded-full w-fit).
+
+  const moreBtnMarker = 'data-walnut-more-btn';
+  const moreFoundResult: { found: boolean } = await c.page.evaluate(
+    ({ f12, f24, s12, s24, moreBtnMarker }: { f12: string; f24: string; s12: string; s24: string; moreBtnMarker: string }) => {
+      function collapse(t: string) { return t.replace(/\s+/g, ' ').trim(); }
+
+      // Parse "HH:MM" 24h or "H:MM AM/PM" to minutes
+      function toMins(t: string): number {
+        const m24 = t.trim().match(/^(\d{1,2}):(\d{2})$/);
+        if (m24) return parseInt(m24[1], 10) * 60 + parseInt(m24[2], 10);
+        const m12 = t.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+        if (m12) {
+          let h = parseInt(m12[1], 10); const min = parseInt(m12[2], 10);
+          if (m12[3].toUpperCase() === 'PM' && h !== 12) h += 12;
+          if (m12[3].toUpperCase() === 'AM' && h === 12) h = 0;
+          return h * 60 + min;
+        }
+        return -1;
+      }
+
+      const targetMins = toMins(s24) >= 0 ? toMins(s24) : toMins(s12);
+
+      // Find all "+N more" buttons (text starts with "+" and contains "more")
+      const allBtns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+      for (const btn of allBtns) {
+        const txt = collapse(btn.textContent ?? '');
+        if (!txt.startsWith('+') || !txt.includes('more')) continue;
+
+        // Check that a sibling/nearby card in the same container matches the target slot
+        const container = btn.parentElement;
+        if (!container) continue;
+
+        // Look for a time span near this button (sibling card content)
+        let timeFound = false;
+        const nearSpans = Array.from(container.querySelectorAll('span')) as HTMLElement[];
+        for (const sp of nearSpans) {
+          const spTxt = collapse(sp.textContent ?? '');
+          // "09:30" or "09:30 - 10:00" or "9:30 AM"
+          const m = toMins(spTxt);
+          if (m >= 0 && m === targetMins) { timeFound = true; break; }
+          // Also check combined "HH:MM - HH:MM" form
+          const parts = spTxt.split(/\s*-\s*/);
+          if (parts.length === 2 && toMins(parts[0]) === targetMins) { timeFound = true; break; }
+        }
+        // Also search parent siblings if not found yet
+        if (!timeFound && container.parentElement) {
+          for (const sp of Array.from(container.parentElement.querySelectorAll('span')) as HTMLElement[]) {
+            const spTxt = collapse(sp.textContent ?? '');
+            const m = toMins(spTxt);
+            if (m >= 0 && m === targetMins) { timeFound = true; break; }
+            const parts = spTxt.split(/\s*-\s*/);
+            if (parts.length === 2 && toMins(parts[0]) === targetMins) { timeFound = true; break; }
+          }
+        }
+
+        if (timeFound) {
+          btn.setAttribute(moreBtnMarker, '1');
+          return { found: true };
+        }
+      }
+      return { found: false };
+    },
+    { f12: full12, f24: full24, s12: start12, s24: start24, moreBtnMarker }
+  );
+
+  if (moreFoundResult.found) {
+    ctx.log('Variant J: found "+N more" button for slot — clicking to expand...');
+    // Click the "+N more" button via Playwright
+    await c.page.locator(`[${moreBtnMarker}]`).first().click({ timeout: 5000 });
+    // Remove the marker
+    await c.page.evaluate((attr: string) => {
+      document.querySelectorAll(`[${attr}]`).forEach((el: Element) => el.removeAttribute(attr));
+    }, moreBtnMarker);
+
+    // Wait for the popup/expanded card list to appear
+    await c.wait(600);
+
+    // Find and click the correct card in the expanded popup
+    const popupClickResult: { clicked: boolean; cardRole: string } = await c.page.evaluate(
+      ({ roleFilter, s24, s12, marker }: { roleFilter: string; s24: string; s12: string; marker: string }) => {
+        function collapse(t: string) { return t.replace(/\s+/g, ' ').trim(); }
+        function toMins(t: string): number {
+          const m24 = t.trim().match(/^(\d{1,2}):(\d{2})$/);
+          if (m24) return parseInt(m24[1], 10) * 60 + parseInt(m24[2], 10);
+          const m12 = t.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+          if (m12) {
+            let h = parseInt(m12[1], 10); const min = parseInt(m12[2], 10);
+            if (m12[3].toUpperCase() === 'PM' && h !== 12) h += 12;
+            if (m12[3].toUpperCase() === 'AM' && h === 12) h = 0;
+            return h * 60 + min;
+          }
+          return -1;
+        }
+        const targetMins = toMins(s24) >= 0 ? toMins(s24) : toMins(s12);
+
+        // Collect expanded card rows — each row has a role badge and a time span
+        // Look for elements that appeared after the popup: containers with a role badge span
+        // (class contains "rounded-full" and "w-fit") and a time span nearby
+        const roleBadgeSpans = Array.from(document.querySelectorAll(
+          'span[class*="rounded-full"][class*="w-fit"], span[class*="font-semibold"][class*="rounded-full"]'
+        )) as HTMLElement[];
+
+        // Group by card container — walk up to the flex-col container that holds name+badge+time
+        interface CardCandidate { container: HTMLElement; role: string; timeMins: number }
+        const candidates: CardCandidate[] = [];
+
+        for (const badgeSpan of roleBadgeSpans) {
+          const badgeText = collapse(badgeSpan.textContent ?? '');
+          if (!badgeText) continue;
+
+          // Walk up to find the card container (flex-col with gap-1)
+          let cardContainer: HTMLElement | null = badgeSpan.parentElement;
+          let depth = 0;
+          while (cardContainer && depth < 5) {
+            if (cardContainer.classList.contains('flex-col') || cardContainer.classList.contains('flex-1')) break;
+            cardContainer = cardContainer.parentElement;
+            depth++;
+          }
+          if (!cardContainer) continue;
+
+          // Find time span inside this container: "09:30" or sibling span with " - "
+          let cardTimeMins = -1;
+          for (const sp of Array.from(cardContainer.querySelectorAll('span')) as HTMLElement[]) {
+            const t = collapse(sp.textContent ?? '');
+            const parts = t.split(/\s*-\s*/);
+            if (parts.length >= 2) {
+              const m = toMins(parts[0].trim());
+              if (m === targetMins) { cardTimeMins = m; break; }
+            }
+            const m = toMins(t);
+            if (m === targetMins) { cardTimeMins = m; break; }
+          }
+          if (cardTimeMins < 0) continue;
+
+          // Deduplicate by container
+          if (candidates.some(c => c.container === cardContainer)) continue;
+          candidates.push({ container: cardContainer, role: badgeText, timeMins: cardTimeMins });
+        }
+
+        if (candidates.length === 0) return { clicked: false, cardRole: '' };
+
+        // Pick the card: if roleFilter given, match role badge (case-insensitive partial match)
+        let chosen: CardCandidate | undefined;
+        if (roleFilter) {
+          chosen = candidates.find(c =>
+            c.role.toLowerCase().includes(roleFilter.toLowerCase())
+          );
+        }
+        // Fallback: first card
+        if (!chosen) chosen = candidates[0];
+
+        // Walk up from chosen.container to find a clickable ancestor
+        let clickTarget: HTMLElement = chosen.container;
+        let cur: HTMLElement | null = chosen.container;
+        while (cur) {
+          if (cur.classList.contains('cursor-pointer') || cur.tagName === 'BUTTON') {
+            clickTarget = cur; break;
+          }
+          cur = cur.parentElement;
+        }
+
+        clickTarget.setAttribute(marker, '1');
+        return { clicked: true, cardRole: chosen.role };
+      },
+      { roleFilter, s24: start24, s12: start12, marker: MARKER }
+    );
+
+    if (popupClickResult.clicked) {
+      await c.wait(300);
+      try {
+        await c.page.locator(`[${MARKER}]`).first().click({ timeout: 5000 });
+      } finally {
+        await c.page.evaluate((m: string) => {
+          document.querySelectorAll(`[${m}]`).forEach((el: Element) => el.removeAttribute(m));
+        }, MARKER);
+      }
+      ctx.log(`Variant J: clicked expanded card — role: "${popupClickResult.cardRole}"`);
+      // Skip the main evaluate scan — we're done
+      const afterJ: string = await c.page.evaluate(() => document.body.innerText ?? '');
+      if (afterJ !== beforeSnapshot) {
+        ctx.log('Variant J: detail panel updated after expanded card click.');
+      }
+      if (weekdayVarName) ctx.setVariable(weekdayVarName, '');
+      if (dateVarName) ctx.setVariable(dateVarName, '');
+      return;
+    }
+    ctx.log('Variant J: could not identify card in expanded popup — falling through to main scan.');
+  }
+
   const clickResult: { clicked: boolean; matched: string; cardRole: string; weekday: string; date: string } = await c.page.evaluate(
     ({ f12, f24, s12, e12, s24, e24, marker, roleFilter }: {
       f12: string; f24: string;
@@ -633,10 +902,16 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           if (cur.classList.contains('cursor-pointer')) return cur;
           cur = cur.parentElement;
         }
-        // Fallback: walk up to find any div with w-full
+        // Fallback 1: walk up to find any div with w-full
         cur = el;
         while (cur) {
           if (cur.tagName === 'DIV' && cur.classList.contains('w-full')) return cur;
+          cur = cur.parentElement;
+        }
+        // Fallback 2: walk up to find a div.flex-col (Variant E3 card container)
+        cur = el;
+        while (cur) {
+          if (cur.tagName === 'DIV' && cur.classList.contains('flex-col')) return cur;
           cur = cur.parentElement;
         }
         return el;
@@ -764,7 +1039,11 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           const text = collapse(span.textContent ?? '');
           if (isMatch(text)) {
             const target = findClickable(span);
-            if (target !== span) {
+            // Accept target even if it equals span — E3 cards have no cursor-pointer ancestor
+            // but findClickable will have walked up to div.flex-col as the clickable container.
+            // Only skip if target is still a bare <span> with no parent card structure found.
+            const isBareSspan = target === span && target.tagName === 'SPAN';
+            if (!isBareSspan) {
               const cardRole = extractCardRole(target);
               // Avoid duplicate if already found via <p> scan
               if (!matchedWeekColCards.some(m => m.target === target)) {
@@ -783,6 +1062,195 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         }
         const first = matchedWeekColCards[0];
         return markAndScroll(first.target, first.text, first.cardRole, first.weekday, first.date);
+      }
+
+      // ── Variant G: data-card week-view grid (pixel-top time encoding, count badge) ─────────────
+      // Column: <div class="flex-1 relative bg-white" style="min-width: 140px; height: 3840px; ...">
+      // Card:   <div data-card="1" class="absolute left-0 right-0 z-10 flex items-center
+      //              justify-center cursor-pointer hover:bg-blue-50/60 transition-colors"
+      //              style="top: 1600px; height: 80px;">
+      //           <span class="text-lg font-bold text-btn-primary">1</span>
+      //         </div>
+      // Time is encoded as CSS `top` pixel offset (not text).
+      // Calibration from DOM screenshots: 6:30 PM → top:1600px, 7:30 PM → top:1920px
+      //   → 320 px = 60 min  →  px/min = 16/3
+      //   Reference: 6:30 PM = 1110 min from midnight → offset = 1110 − (1600×3/16) = 810 min
+      //   Formula: top_px = (totalMinutes − 810) × (16/3)
+      //   Tolerance: ±20 px (< half a slot height of 80px) to absorb rounding.
+      // Strategy: parse start time → compute expected top → find nearest [data-card] within ±20px.
+      {
+        function timeToMinutes(t: string): number {
+          const m24 = t.trim().match(/^(\d{1,2}):(\d{2})$/);
+          if (m24) return parseInt(m24[1], 10) * 60 + parseInt(m24[2], 10);
+          const m12 = t.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+          if (m12) {
+            let h = parseInt(m12[1], 10);
+            const min = parseInt(m12[2], 10);
+            const p = m12[3].toUpperCase();
+            if (p === 'PM' && h !== 12) h += 12;
+            if (p === 'AM' && h === 12) h = 0;
+            return h * 60 + min;
+          }
+          return -1;
+        }
+
+        const startMins24 = timeToMinutes(s24);
+        const startMins12 = timeToMinutes(s12);
+        const startMins = startMins24 >= 0 ? startMins24 : startMins12;
+
+        if (startMins >= 0) {
+          // ── Match [data-card] by reading adjacent time-label text (no pixel formula) ─────────────
+          // The pixel-top formula is unreliable across page sizes (e.g. 7:30 PM showed top:1680px
+          // on one page but formula predicted 1920px, and "closest card" then picked 10:30 AM instead).
+          //
+          // CORRECT STRATEGY:
+          //   Each [data-card] is positioned inside a column container whose sibling LEFT column
+          //   contains time-label spans ("7:30 PM", "8:00 PM"...) also positioned with style.top.
+          //   We pair each card's top with the nearest time-label top to read the actual time.
+          //   If the paired time matches the target slot → click that card.
+          //
+          //   Fallback chain:
+          //   1. Pair cards with time-label spans by matching top values (±5px).
+          //   2. If no pairing possible, use px/min ratio derived from two paired cards.
+          //   3. Only if ALL else fails, fall through to Variant H.
+
+          const dataCards = Array.from(document.querySelectorAll('[data-card]')) as HTMLElement[];
+
+          // ── Index-based time matching (confirmed from DOM screenshots) ─────────────────────────────
+          // The DOM has two sibling structures in the same scroll area:
+          //   LEFT column: stacked <div style="height:80px; ...">7:30 PM</div> in DOM order (no style.top)
+          //   RIGHT column(s): <div data-card="1" style="top:1680px; height:80px;"> (absolute)
+          //
+          // Formula: card.style.top = labelIndex × SLOT_HEIGHT
+          //   e.g. top:1680px → 1680/80 = index 21 → 21st time-label div = "7:30 PM" ✓
+          //
+          // Algorithm:
+          //   1. Collect all time-label divs in DOM order (leaf divs with style.height=SLOT_HEIGHT and
+          //      parseable time text like "7:30 PM", "8:00 PM").
+          //   2. Find the index N of the label whose text matches s12 or s24 (normalised).
+          //   3. expectedTop = N × SLOT_HEIGHT.
+          //   4. Find [data-card] whose style.top === expectedTop (within ±2px rounding tolerance).
+
+          const SLOT_HEIGHT = dataCards.length > 0 && dataCards[0].style?.height
+            ? (parseFloat(dataCards[0].style.height) || 80)
+            : 80;
+
+          // Normalise a time string: strip leading zeros e.g. "07:30 PM" → "7:30 PM"
+          function normTime(t: string): string {
+            return t.trim().replace(/\b0(\d)(:\d{2})/g, '$1$2');
+          }
+          const s12Norm = normTime(s12);
+          const s24Norm = normTime(s24);
+
+          // Collect time-label divs in DOM order.
+          // A time-label div is a leaf div (no children) whose style.height matches SLOT_HEIGHT
+          // and whose text content parses as a time.
+          const timeLabelDivs: { mins: number; text: string }[] = [];
+          const allDivs = Array.from(document.querySelectorAll('div')) as HTMLElement[];
+          for (const div of allDivs) {
+            if (div.children.length > 0) continue; // only leaf divs
+            const rawH = div.style ? div.style.height : '';
+            if (!rawH) continue;
+            const h = parseFloat(rawH);
+            // Accept divs whose height is within 2px of SLOT_HEIGHT
+            if (Math.abs(h - SLOT_HEIGHT) > 2) continue;
+            const txt = (div.textContent ?? '').trim();
+            if (!txt || txt.length > 10) continue;
+            const mins = timeToMinutes(txt);
+            if (mins < 0) continue;
+            timeLabelDivs.push({ mins, text: txt });
+          }
+
+          // Find the index of the label matching the target time
+          let labelIndex = -1;
+          for (let i = 0; i < timeLabelDivs.length; i++) {
+            const norm = normTime(timeLabelDivs[i].text);
+            if (norm === s12Norm || norm === s24Norm) {
+              labelIndex = i;
+              break;
+            }
+          }
+
+          if (labelIndex >= 0) {
+            const expectedTop = labelIndex * SLOT_HEIGHT;
+            const TOLERANCE = 2; // px rounding tolerance
+            for (const card of dataCards) {
+              const cardTopStr = (card.style && card.style.top) ? card.style.top : '';
+              const cardTopPx = parseFloat(cardTopStr);
+              if (isNaN(cardTopPx)) continue;
+              if (Math.abs(cardTopPx - expectedTop) <= TOLERANCE) {
+                const target = card.classList.contains('cursor-pointer') ? card : findClickable(card);
+                return markAndScroll(target, f12, '', '', '');
+              }
+            }
+          }
+        }
+      }
+
+      // ── Variant H: flex row with inline time label and count badge ─────────────────────────────
+      // Row: <div class="flex border-b border-gray-100 ... relative cursor-pointer bg-white hover:bg-gray-50"
+      //           style="min-height: 50px;">
+      //   <div class="flex-shrink-0 flex items-center justify-center text-xs font-medium whitespace-nowrap
+      //               border-r border-gray-200 bg-white text-gray-400" style="width: 80px; min-height: 50px;">
+      //     6:30 PM
+      //   </div>
+      //   <div class="flex-1 relative" style="min-height: 50px;">
+      //     <div class="absolute inset-0 flex items-center pl-4">
+      //       <span class="text-lg font-bold text-btn-primary">1</span>
+      //     </div>
+      //   </div>
+      // </div>
+      //
+      // The time IS stored as text in the flex-shrink-0 label div (e.g. "6:30 PM").
+      // The entire outer row div is cursor-pointer — that is what gets clicked.
+      // Match strategy: scan all flex cursor-pointer rows, read the flex-shrink-0 child text,
+      // normalise to 12h/24h, compare against start12/start24 of the target slot.
+      {
+        const hRows = Array.from(document.querySelectorAll('div.flex.cursor-pointer')) as HTMLElement[];
+        const matchedHRows: { target: HTMLElement; weekday: string; date: string }[] = [];
+
+        function normLabelH(t: string): string {
+          return t.replace(/\b0(\d)(:\d{2})/g, '$1$2').trim();
+        }
+        const s12Norm = normLabelH(s12);
+        const s24Norm = normLabelH(s24);
+
+        for (const row of hRows) {
+          // Must have a flex-shrink-0 direct child (the time label)
+          const labelDiv = row.querySelector(':scope > div.flex-shrink-0') as HTMLElement | null;
+          if (!labelDiv) continue;
+
+          // Read and normalise the time label
+          const labelRaw = (labelDiv.textContent ?? '').replace(/\s+/g, ' ').trim();
+          const labelNorm = normLabelH(labelRaw);
+          if (labelNorm !== s12Norm && labelNorm !== s24Norm) continue;
+
+          // Time label matches — find the specific flex-1 column that contains the badge.
+          // In multi-column week-views each row has multiple flex-1 divs (one per day).
+          // We must click the SPECIFIC column div that has the badge, not the whole row —
+          // clicking the whole row lands at the row's center which is often an empty column.
+          const allContentDivs = Array.from(row.querySelectorAll(':scope > div.flex-1')) as HTMLElement[];
+          let badgeCol: HTMLElement | null = null;
+          for (const col of allContentDivs) {
+            if (col.querySelector('span.text-btn-primary, span[class*="text-btn-primary"]') !== null) {
+              badgeCol = col;
+              break;
+            }
+          }
+          // Fallback: use the badge span's parent if not found via flex-1 scan
+          if (!badgeCol) {
+            const badgeSpan = row.querySelector('span.text-btn-primary, span[class*="text-btn-primary"]') as HTMLElement | null;
+            if (badgeSpan) badgeCol = badgeSpan.parentElement as HTMLElement | null;
+          }
+          if (!badgeCol) continue;
+
+          // Click the specific column div containing the badge (not the whole row)
+          matchedHRows.push({ target: badgeCol, weekday: '', date: '' });
+        }
+        if (matchedHRows.length > 0) {
+          const best = matchedHRows[0];
+          return markAndScroll(best.target, f12, '', best.weekday, best.date);
+        }
       }
 
       // ── Variants A/B/C: scan all <p> tags for time match ─────────────────────────────────────
@@ -889,6 +1357,96 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         }
         const first = matchedAptCards[0];
         return markAndScroll(first.target, first.text, first.cardRole);
+      }
+
+      // ── Variant E3: week/day-view card — same inner structure as E2 but NO data-apt-card attr ────
+      // Same card inner structure as E2 but the outer wrapper does not have [data-apt-card].
+      // Calendar card DOM (from week-view screenshot):
+      //   <div class="flex flex-col h-full px-2 py-1 gap-0.5 overflow-hidden">
+      //     <div class="flex items-center gap-1.5 min-w-0">
+      //       <div class="h-6 w-6 rounded-full ...">TV</div>
+      //       <span class="text-[13px] font-semibold leading-tight truncate text-gray-800">Tarulata Venkataraman</span>
+      //     </div>
+      //     <div class="rounded-md px-1.5 py-0.5 self-start" style="background-color: rgb(255,255,255);">
+      //       <span class="text-[10px] font-medium leading-tight truncate" style="color: rgb(22,163,74);">
+      //         "7:30 PM" " - " "8:00 PM"
+      //       </span>
+      //     </div>
+      //     <div class="flex items-center gap-1 mt-auto pl-0.5">
+      //       <span class="w-1.5 h-1.5 rounded-full flex-shrink-0"></span>
+      //       <span class="text-[12px] font-medium leading-tight truncate capitalize">md new patient oncology</span>
+      //     </div>
+      //   </div>
+      //
+      // Strategy: scan all <span class="text-[10px] font-medium leading-tight truncate"> elements,
+      // match time text, walk up to the nearest cursor-pointer ancestor for clicking.
+      {
+        const leadingTightSpans = Array.from(document.querySelectorAll(
+          'span[class*="leading-tight"][class*="font-medium"], span[class*="text-[10px]"][class*="leading-tight"]'
+        )) as HTMLElement[];
+        const matchedE3Cards: { target: HTMLElement; text: string; cardRole: string }[] = [];
+        for (const span of leadingTightSpans) {
+          const text = collapse(span.textContent ?? '');
+          if (!isMatch(text)) continue;
+          const target = findClickable(span);
+          const cardRole = extractCardRole(target);
+          matchedE3Cards.push({ target, text, cardRole });
+        }
+        if (matchedE3Cards.length > 0) {
+          if (roleFilter) {
+            const roleMatch = matchedE3Cards.find(
+              c => c.cardRole.trim().toLowerCase() === roleFilter.toLowerCase()
+            );
+            // If role matched, use it; otherwise fall back to first card
+            // (Variant E3 cards may not have a role badge at all)
+            if (roleMatch) return markAndScroll(roleMatch.target, roleMatch.text, roleMatch.cardRole);
+          }
+          const first = matchedE3Cards[0];
+          return markAndScroll(first.target, first.text, first.cardRole);
+        }
+      }
+
+      // ── Variant I: day-view modal card — time in <span class="inline-block ... rounded-md"> ────
+      // Card structure (no data-apt-card attribute):
+      //   <div class="px-3 pb-3">
+      //     <p class="text-[13px] font-semibold text-gray-900 ...">Tarulata Robert Venkataraman</p>
+      //     <span class="inline-block text-[10px] font-medium whitespace-nowrap px-2 py-0.5 rounded-md bg-white"
+      //           style="color: rgb(22, 163, 74);">
+      //       "6:30 PM" " - " "7 PM"
+      //     </span>
+      //     <p class="mt-1 flex items-center gap-1 ...">
+      //       <span class="w-1.5 h-1.5 rounded-full flex-shrink-0" style="..."></span>
+      //       "Md New Patient Oncology"
+      //     </p>
+      //   </div>
+      //
+      // Time is in a <span class="inline-block ... rounded-md"> — NOT in a <p> and NOT in [data-apt-card].
+      // The text nodes are collapsed: "6:30 PM - 7 PM" → matched by isMatch() which normalises
+      // dash separators and strips :00 minutes.
+      // Strategy: scan all <span> elements with "inline-block" and "rounded-md" classes,
+      // collapse their text, run isMatch(), then walk up to the nearest cursor-pointer ancestor.
+      {
+        const roundedSpans = Array.from(document.querySelectorAll(
+          'span[class*="inline-block"][class*="rounded-md"], span[class*="inline-block"][class*="rounded"]'
+        )) as HTMLElement[];
+        const matchedICards: { target: HTMLElement; text: string; cardRole: string }[] = [];
+        for (const span of roundedSpans) {
+          const text = collapse(span.textContent ?? '');
+          if (!isMatch(text)) continue;
+          const target = findClickable(span);
+          const cardRole = extractCardRole(target);
+          matchedICards.push({ target, text, cardRole });
+        }
+        if (matchedICards.length > 0) {
+          if (roleFilter) {
+            const roleMatch = matchedICards.find(
+              c => c.cardRole.trim().toLowerCase() === roleFilter.toLowerCase()
+            );
+            if (roleMatch) return markAndScroll(roleMatch.target, roleMatch.text, roleMatch.cardRole);
+          }
+          const first = matchedICards[0];
+          return markAndScroll(first.target, first.text, first.cardRole);
+        }
       }
 
       // ── Variant D: week-view row with two time <span> labels ──────────────────────────────────
@@ -1014,7 +1572,21 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
     // Wait for smooth scroll animation to settle (300ms is typical)
     await c.wait(400);
     try {
-      await c.page.locator(`[${MARKER}]`).first().click({ timeout: 5000 });
+      // First attempt: normal click (respects pointer-event checks)
+      try {
+        await c.page.locator(`[${MARKER}]`).first().click({ timeout: 5000 });
+      } catch (normalClickErr: any) {
+        // If the click fails because a child element intercepts pointer events
+        // (e.g. "w-full h-full" inner wrapper), retry with force:true which
+        // dispatches the click event directly without the pointer-event visibility check.
+        const msg: string = (normalClickErr?.message ?? '').toLowerCase();
+        if (msg.includes('intercepts pointer events') || msg.includes('timeout') || msg.includes('exceeded')) {
+          ctx.log('Normal click intercepted — retrying with force:true...');
+          await c.page.locator(`[${MARKER}]`).first().click({ force: true, timeout: 5000 });
+        } else {
+          throw normalClickErr;
+        }
+      }
     } finally {
       // Remove the marker attribute regardless of click success/failure
       await c.page.evaluate((marker: string) => {
@@ -1209,6 +1781,80 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
             }
           } catch {
             // ignore
+          }
+        }
+
+        // Variant H fallback: flex cursor-pointer row with inline time label
+        {
+          const hRows2 = Array.from(document.querySelectorAll('div.flex.cursor-pointer')) as HTMLElement[];
+          for (const row of hRows2) {
+            const labelDiv = row.querySelector(':scope > div.flex-shrink-0') as HTMLElement | null;
+            if (!labelDiv) continue;
+            const labelRaw = (labelDiv.textContent ?? '').replace(/\s+/g, ' ').trim()
+              .replace(/\b0(\d)(:\d{2})/g, '$1$2');
+            const s12c = s12.replace(/\b0(\d)(:\d{2})/g, '$1$2');
+            const s24c = s24.replace(/\b0(\d)(:\d{2})/g, '$1$2');
+            if (labelRaw !== s12c && labelRaw !== s24c) continue;
+            // Find the specific flex-1 column with the badge — click it, not the whole row
+            const allCols2 = Array.from(row.querySelectorAll(':scope > div.flex-1')) as HTMLElement[];
+            let badgeCol2: HTMLElement | null = null;
+            for (const col of allCols2) {
+              if (col.querySelector('span.text-btn-primary, span[class*="text-btn-primary"]') !== null) {
+                badgeCol2 = col;
+                break;
+              }
+            }
+            if (!badgeCol2) {
+              const bs = row.querySelector('span.text-btn-primary, span[class*="text-btn-primary"]') as HTMLElement | null;
+              if (bs) badgeCol2 = bs.parentElement as HTMLElement | null;
+            }
+            if (badgeCol2) return markAndScroll2(badgeCol2, f12, '');
+          }
+        }
+
+        // Variant G fallback: data-card week-view — index-based time matching
+        // Same approach as primary block: card.style.top = labelIndex × SLOT_HEIGHT
+        {
+          const dataCards2 = Array.from(document.querySelectorAll('[data-card]')) as HTMLElement[];
+          if (dataCards2.length > 0) {
+            const slotH2 = dataCards2[0].style?.height
+              ? (parseFloat(dataCards2[0].style.height) || 80) : 80;
+            function normTime2(t: string): string {
+              return t.trim().replace(/\b0(\d)(:\d{2})/g, '$1$2');
+            }
+            const s12n = normTime2(s12);
+            const s24n = normTime2(s24);
+            // Collect time-label divs in DOM order (leaf divs with style.height=slotH2)
+            const lblDivs2: string[] = [];
+            for (const div of Array.from(document.querySelectorAll('div')) as HTMLElement[]) {
+              if (div.children.length > 0) continue;
+              const rawH = div.style ? div.style.height : '';
+              if (!rawH || Math.abs(parseFloat(rawH) - slotH2) > 2) continue;
+              const txt = (div.textContent ?? '').trim();
+              if (!txt || txt.length > 10) continue;
+              // Must parse as a time
+              const m12 = txt.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+              const m24 = txt.match(/^(\d{1,2}):(\d{2})$/);
+              if (!m12 && !m24) continue;
+              lblDivs2.push(txt);
+            }
+            // Find the index of the label matching the target time
+            let lblIdx = -1;
+            for (let i = 0; i < lblDivs2.length; i++) {
+              const n = normTime2(lblDivs2[i]);
+              if (n === s12n || n === s24n) { lblIdx = i; break; }
+            }
+            if (lblIdx >= 0) {
+              const expTop = lblIdx * slotH2;
+              for (const card of dataCards2) {
+                const cardTop = parseFloat(card.style ? card.style.top : '');
+                if (isNaN(cardTop)) continue;
+                if (Math.abs(cardTop - expTop) <= 2) {
+                  const target = card.classList.contains('cursor-pointer') ? card : findClickable(card);
+                  return markAndScroll2(target, f12, '');
+                }
+              }
+            }
           }
         }
 
