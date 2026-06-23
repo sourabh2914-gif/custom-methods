@@ -1,9 +1,9 @@
 import type { WalnutContext } from './walnut';
 
 /** @walnut_method
- * name: Click Share and Verify Count
+ * name: Share and Verify Count
  * description: Click share button on ${shareSelector} and store before count in $[beforeShareCount] and after count in $[afterShareCount]
- * actionType: custom_click_share_and_verify_count
+ * actionType: custom_share_and_verify_count
  * context: web
  * needsLocator: false
  * category: Interaction
