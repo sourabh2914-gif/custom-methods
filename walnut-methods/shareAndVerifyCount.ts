@@ -20,11 +20,17 @@ export async function shareAndVerifyCount(ctx: WalnutContext) {
 
   const c = ctx as any;
 
-  const blogTitle: string     = c.args?.[0]; // ${blogTitle}
+  const blogTitleArg: string  = c.args?.[0]; // ${blogTitle}
   const shareCountVar: string = c.args?.[1]; // $[shareCount]
 
-  if (!blogTitle)      throw new Error('blogTitle (args[0]) is required.');
+  if (!blogTitleArg)   throw new Error('blogTitle (args[0]) is required.');
   if (!shareCountVar)  throw new Error('output variable $[shareCount] (args[1]) is required.');
+
+  // args[0] may be either the actual title value (from ${blogTitle} test data)
+  // OR a variable name string (when user passes $[BlogTitle_P] as the test data value).
+  // Try getVariable() first; fall back to the raw string if nothing is stored under that name.
+  const blogTitle: string = c.getVariable(blogTitleArg) || blogTitleArg;
+  c.log(`Blog title resolved: "${blogTitle}"`);
 
   // Build the XPath using the resolved blog title value
   // [2] = share container (1=like, 2=comment, 3=share based on DOM order)
