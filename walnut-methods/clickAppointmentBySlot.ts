@@ -1572,7 +1572,21 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
     // Wait for smooth scroll animation to settle (300ms is typical)
     await c.wait(400);
     try {
-      await c.page.locator(`[${MARKER}]`).first().click({ timeout: 5000 });
+      // First attempt: normal click (respects pointer-event checks)
+      try {
+        await c.page.locator(`[${MARKER}]`).first().click({ timeout: 5000 });
+      } catch (normalClickErr: any) {
+        // If the click fails because a child element intercepts pointer events
+        // (e.g. "w-full h-full" inner wrapper), retry with force:true which
+        // dispatches the click event directly without the pointer-event visibility check.
+        const msg: string = (normalClickErr?.message ?? '').toLowerCase();
+        if (msg.includes('intercepts pointer events') || msg.includes('timeout') || msg.includes('exceeded')) {
+          ctx.log('Normal click intercepted — retrying with force:true...');
+          await c.page.locator(`[${MARKER}]`).first().click({ force: true, timeout: 5000 });
+        } else {
+          throw normalClickErr;
+        }
+      }
     } finally {
       // Remove the marker attribute regardless of click success/failure
       await c.page.evaluate((marker: string) => {
