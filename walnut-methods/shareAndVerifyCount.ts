@@ -17,11 +17,15 @@ export async function shareAndVerifyCount(ctx: WalnutContext) {
 
   const c = ctx as any;
 
-  const countSelector: string = c.args?.[0]; // ${countSelector}
+  const rawSelector: string   = c.args?.[0]; // ${countSelector}
   const shareCountVar: string = c.args?.[1]; // $[shareCount]
 
-  if (!countSelector) throw new Error('countSelector (args[0]) is required.');
-  if (!shareCountVar) throw new Error('output variable $[shareCount] (args[1]) is required.');
+  if (!rawSelector)    throw new Error('countSelector (args[0]) is required.');
+  if (!shareCountVar)  throw new Error('output variable $[shareCount] (args[1]) is required.');
+
+  // Resolve {{variableName}} placeholders inside the selector (e.g. {{BlogTitle}})
+  const countSelector: string = c.replacePlaceholders(rawSelector);
+  c.log(`Resolved countSelector: ${countSelector}`);
 
   // Read the count — tries the element itself first, then its child <span>
   // (needed when countSelector points to a container div that has SVG + span inside,
