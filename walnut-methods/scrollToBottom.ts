@@ -9,38 +9,54 @@ import type { WalnutContext } from './walnut';
  * category: Interaction
  */
 export async function scrollToBottom(ctx: WalnutContext) {
-  // args[0] — scrollSelector : XPath or CSS selector of the scrollable container
-  //                            Pass "window" to scroll the main page to the bottom
+  // args[0] — scrollSelector : XPath/CSS selector of a specific container, OR "window" to
+  //                            auto-find and scroll ALL scrollable containers on the page.
   //
-  // Example:
-  //   scrollSelector = "window"  → scrolls the full page to bottom
-  //   scrollSelector = "//div[contains(@class,'overflow-y-auto')]"  → scrolls a specific panel
+  // NOTE: Many apps use a fixed layout where the visible scrollbar belongs to an inner div,
+  // not the browser window. Passing "window" here handles both cases — it scrolls window
+  // AND every element on the page that has overflow content (scrollHeight > clientHeight).
 
   const c = ctx as any;
 
   const scrollSelector: string = c.args?.[0];
 
-  if (!scrollSelector) throw new Error('scrollSelector (args[0]) is required. Pass "window" to scroll the main page.');
+  if (!scrollSelector) throw new Error('scrollSelector (args[0]) is required. Pass "window" to auto-scroll all scrollable containers.');
 
   if (scrollSelector.trim().toLowerCase() === 'window') {
-    // Scroll the entire page to the very bottom
-    await c.page.evaluate(() => {
-      window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+    // Scroll both window and ALL inner scrollable containers to bottom
+    const count: number = await c.page.evaluate(() => {
+      // 1. Scroll the browser window itself
+      window.scrollTo({ top: document.body.scrollHeight, behavior: 'instant' });
+      document.documentElement.scrollTop = document.documentElement.scrollHeight;
+
+      // 2. Find and scroll every element that has vertical overflow
+      const all = Array.from(document.querySelectorAll('*'));
+      let scrolled = 0;
+      for (const el of all) {
+        const style = window.getComputedStyle(el);
+        const overflow = style.overflow + style.overflowY;
+        const hasOverflow = overflow.includes('auto') || overflow.includes('scroll');
+        const isScrollable = (el as HTMLElement).scrollHeight > (el as HTMLElement).clientHeight;
+        if (hasOverflow && isScrollable) {
+          (el as HTMLElement).scrollTop = (el as HTMLElement).scrollHeight;
+          scrolled++;
+        }
+      }
+      return scrolled;
     });
-    c.log('Scrolled main page (window) to bottom');
+    c.log(`Scrolled window + ${count} inner scrollable container(s) to bottom`);
   } else {
-    // Scroll a specific container element to its bottom
-    const scrolled: boolean = await c.page.evaluate((xpath: string) => {
-      // Support both XPath and CSS selectors
+    // Scroll a specific container by XPath or CSS selector
+    const scrolled: boolean = await c.page.evaluate((sel: string) => {
       let el: Element | null = null;
-      if (xpath.startsWith('/') || xpath.startsWith('(')) {
-        const result = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+      if (sel.startsWith('/') || sel.startsWith('(')) {
+        const result = document.evaluate(sel, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
         el = result.singleNodeValue as Element | null;
       } else {
-        el = document.querySelector(xpath);
+        el = document.querySelector(sel);
       }
       if (!el) return false;
-      (el as HTMLElement).scrollTo({ top: (el as HTMLElement).scrollHeight, behavior: 'smooth' });
+      (el as HTMLElement).scrollTop = (el as HTMLElement).scrollHeight;
       return true;
     }, scrollSelector);
 
@@ -50,6 +66,5 @@ export async function scrollToBottom(ctx: WalnutContext) {
     c.log(`Scrolled container "${scrollSelector}" to bottom`);
   }
 
-  // Wait for smooth scroll to complete
   await c.wait(800);
 }
