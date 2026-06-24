@@ -8,7 +8,7 @@ import type { WalnutContext } from './walnut';
  * needsLocator: false
  * category: Interaction
  */
-export async function likeDislikeCommentAndVerifyCount(ctx: WalnutContext) {
+export async function likeDislikeCommentNestedCommentAndVerifyCount(ctx: WalnutContext) {
   // ctx.args layout:
   //   args[0] — commentLikeSelector      : XPath of the like button/container for the comment or nested comment
   //   args[1] — "beforeCommentLikeCount" : output variable name — count BEFORE click (defaults to 0 if not shown)
