@@ -22,13 +22,22 @@ export async function likeDislikeCommentNestedCommentAndVerifyCount(ctx: WalnutC
 
   const c = ctx as any;
 
-  const commentLikeSelector: string = c.args?.[0];
-  const beforeVar: string           = c.args?.[1]; // $[beforeCommentLikeCount]
-  const afterVar: string            = c.args?.[2]; // $[afterCommentLikeCount]
+  const rawSelector: string = c.args?.[0];
+  const beforeVar: string   = c.args?.[1]; // $[beforeCommentLikeCount]
+  const afterVar: string    = c.args?.[2]; // $[afterCommentLikeCount]
 
-  if (!commentLikeSelector) throw new Error('commentLikeSelector (args[0]) is required.');
-  if (!beforeVar)           throw new Error('output variable $[beforeCommentLikeCount] (args[1]) is required.');
-  if (!afterVar)            throw new Error('output variable $[afterCommentLikeCount] (args[2]) is required.');
+  if (!rawSelector) throw new Error('commentLikeSelector (args[0]) is required.');
+  if (!beforeVar)   throw new Error('output variable $[beforeCommentLikeCount] (args[1]) is required.');
+  if (!afterVar)    throw new Error('output variable $[afterCommentLikeCount] (args[2]) is required.');
+
+  // Resolve $[varName] placeholders embedded inside the selector string
+  // e.g. //p[normalize-space()='$[Doctor_Comment]']/... → replaces $[Doctor_Comment] with its actual value
+  const commentLikeSelector: string = rawSelector.replace(/\$\[([^\]]+)\]/g, (_: string, varName: string) => {
+    const value = c.getVariable(varName);
+    if (!value) throw new Error(`Runtime variable "$[${varName}]" is not set. Store it in an earlier step.`);
+    return value;
+  });
+  c.log(`Resolved selector: ${commentLikeSelector}`);
 
   // Helper: read the like count from the comment like container via textContent
   // Returns 0 if no number is found (handles the "initially no count" case)
