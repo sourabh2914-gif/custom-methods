@@ -14,42 +14,37 @@ export async function verifyMessageStatus(ctx: WalnutContext) {
   const page = c.page;
 
   // args[0] = statusType: "blue_double_tick" | "gray_double_tick" | "gray_single_tick" | "green_online" | "gray_offline"
-  // args[1] = messageText (optional — scope the tick check to a specific message bubble)
+  // args[1] = messageText (optional — scope tick check to a specific message bubble)
   const statusType = (ctx.args?.[0] ?? '').toString().trim().toLowerCase().replace(/\s+/g, '_');
   const messageText = ctx.args?.[1];
 
-  // --- Selector map ---
-  // Double tick icons use lucide-check-check, single tick uses lucide-check
-  // Color is controlled by a Tailwind text-* class on the svg
-  // Online/offline status dot uses a span with bg-* class inside the avatar
-  const SELECTORS: Record<string, string> = {
-    blue_double_tick:  'svg.lucide-check-check.text-blue-500',
-    gray_double_tick:  'svg.lucide-check-check.text-gray-400',
-    gray_single_tick:  'svg.lucide-check.text-gray-400',
-    green_online:      'span.bg-green-400.rounded-full',
-    gray_offline:      'span.rounded-full[class*="bg-[#dcdcdc]"]',
-  };
+  // DOM class signatures observed from the application:
+  //   Gray double tick : svg with classes "lucide lucide-check-check text-gray-400"
+  //   Blue double tick : svg with classes "lucide lucide-check-check text-blue-500"
+  //   Gray single tick : svg with classes "lucide lucide-check text-gray-400"   (NOT lucide-check-check)
+  //   Green online dot : span with class containing "bg-green-400" and "rounded-full"
+  //   Gray offline dot : span with class containing "bg-[#dcdcdc]" and "rounded-full"
 
-  // Fallback selectors for cases where the class is set slightly differently
-  const FALLBACK_SELECTORS: Record<string, string[]> = {
-    blue_double_tick:  [
-      'svg.lucide.lucide-check-check.text-blue-500',
-      'svg[class*="lucide-check-check"][class*="text-blue"]',
+  // CSS selectors — using attribute contains (*=) to be resilient to extra classes
+  const SELECTORS: Record<string, string[]> = {
+    blue_double_tick: [
+      'svg[class*="lucide-check-check"][class*="text-blue-500"]',
+      'svg[class*="check-check"][class*="blue"]',
     ],
-    gray_double_tick:  [
-      'svg.lucide.lucide-check-check.text-gray-400',
+    gray_double_tick: [
       'svg[class*="lucide-check-check"][class*="text-gray-400"]',
+      'svg[class*="check-check"][class*="gray-400"]',
     ],
-    gray_single_tick:  [
-      'svg.lucide.lucide-check.text-gray-400',
-      'svg[class*="lucide-check"][class*="text-gray-400"]:not([class*="lucide-check-check"])',
+    gray_single_tick: [
+      // Must match check but NOT check-check
+      'svg[class*="lucide-check"][class*="text-gray-400"]:not([class*="check-check"])',
+      'svg[class*="lucide-check "][class*="text-gray-400"]',
     ],
-    green_online:      [
-      'span.absolute.bottom-0.right-0.bg-green-400',
+    green_online: [
       'span[class*="bg-green-400"][class*="rounded-full"]',
+      'span.bg-green-400',
     ],
-    gray_offline:      [
-      'span.absolute.bottom-0.right-0[class*="dcdcdc"]',
+    gray_offline: [
       'span[class*="dcdcdc"][class*="rounded-full"]',
       'span[class*="bg-[#dcdcdc]"]',
     ],
@@ -61,51 +56,56 @@ export async function verifyMessageStatus(ctx: WalnutContext) {
     );
   }
 
-  // Helper: try a list of selectors and return the first one that finds a visible element
-  async function findVisible(selectors: string[], scope?: any): Promise<boolean> {
-    const root = scope ?? page;
-    for (const sel of selectors) {
-      try {
-        const el = root.locator(sel).first();
-        if (await el.isVisible({ timeout: 3000 })) {
-          return true;
-        }
-      } catch (_) {
-        // try next selector
-      }
-    }
-    return false;
-  }
+  const selectors = SELECTORS[statusType];
 
-  // If a message text is provided, scope the tick check to that message bubble
-  let scope: any = undefined;
-  if (messageText && (statusType === 'blue_double_tick' || statusType === 'gray_double_tick' || statusType === 'gray_single_tick')) {
+  // Strategy: use page.evaluate (querySelectorAll) which finds elements regardless of scroll position.
+  // This is more reliable than Playwright's isVisible() which can return false for off-screen elements
+  // inside overflow:hidden scroll containers.
+
+  async function countBySelector(sel: string, scopeText?: string): Promise<number> {
     try {
-      // Find the message bubble that contains the given text
-      scope = page.locator('div[class*="relative"][class*="max-w"]').filter({ hasText: messageText });
-      const count = await scope.count();
-      if (count === 0) {
-        // Fall back to no scope
-        scope = undefined;
-        c.warn(`Message bubble containing "${messageText}" not found — checking page-wide`);
-      }
+      return await page.evaluate(
+        ({ selector, text }: { selector: string; text?: string }) => {
+          let elements = Array.from(document.querySelectorAll(selector));
+          if (text) {
+            // Scope to elements whose closest message bubble ancestor contains the text
+            elements = elements.filter(el => {
+              const bubble = el.closest('div[class*="max-w"]') ?? el.closest('div[class*="relative"]');
+              return bubble ? bubble.textContent?.includes(text) : false;
+            });
+          }
+          return elements.length;
+        },
+        { selector: sel, text: scopeText }
+      );
     } catch (_) {
-      scope = undefined;
+      return 0;
     }
   }
 
-  const primarySelector = SELECTORS[statusType];
-  const fallbacks = FALLBACK_SELECTORS[statusType] ?? [];
-  const allSelectors = [primarySelector, ...fallbacks];
+  let found = false;
+  let matchedSelector = '';
 
-  const found = await findVisible(allSelectors, scope);
+  for (const sel of selectors) {
+    const count = await countBySelector(sel, messageText || undefined);
+    if (count > 0) {
+      found = true;
+      matchedSelector = sel;
+      break;
+    }
+  }
 
   if (found) {
-    c.log(`Status icon "${statusType}" is visible${messageText ? ` for message "${messageText}"` : ''} — step passed`);
+    c.log(
+      `Status icon "${statusType}" found (selector: "${matchedSelector}")` +
+      (messageText ? ` for message "${messageText}"` : '') +
+      ' — step passed'
+    );
   } else {
     throw new Error(
-      `Status icon "${statusType}" is NOT visible${messageText ? ` for message "${messageText}"` : ''}. ` +
-      `Tried selectors: ${allSelectors.join(', ')}`
+      `Status icon "${statusType}" is NOT present in the DOM` +
+      (messageText ? ` for message "${messageText}"` : '') +
+      `. Tried selectors: ${selectors.join(', ')}`
     );
   }
 }
