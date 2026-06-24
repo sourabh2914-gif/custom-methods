@@ -1,9 +1,9 @@
 import type { WalnutContext } from './walnut';
 
 /** @walnut_method
- * name: Like Dislike Comment and Verify Count
+ * name: Like Dislike Comment Nested Comment and Verify Count
  * description: Click like or dislike on comment ${commentLikeSelector} and store before count in $[beforeCommentLikeCount] and after count in $[afterCommentLikeCount]
- * actionType: custom_like_dislike_comment_and_verify_count
+ * actionType: custom_like_dislike_comment_nested_comment_and_verify_count
  * context: web
  * needsLocator: false
  * category: Interaction
