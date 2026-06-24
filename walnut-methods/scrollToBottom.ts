@@ -16,12 +16,19 @@ export async function scrollToBottom(ctx: WalnutContext) {
 
   if (!scrollSelector) throw new Error('scrollSelector (args[0]) is required. Pass "window".');
 
-  // Click the body to ensure the page has focus, then press End to scroll to bottom
-  await c.page.click('body');
-  await c.page.keyboard.press('End');
+  // Get the viewport size to find the center of the page for mouse wheel events
+  const viewport = c.page.viewportSize() ?? { width: 1280, height: 720 };
+  const x = viewport.width / 2;
+  const y = viewport.height / 2;
+
+  // Move mouse to center of page and scroll down with mouse wheel repeatedly
+  // This simulates actual user scrolling and works on inner scrollable containers
+  await c.page.mouse.move(x, y);
+  for (let i = 0; i < 20; i++) {
+    await c.page.mouse.wheel(0, 1000);
+    await c.wait(100);
+  }
+
   await c.wait(500);
-  // Press End again to make sure we're at the very last position
-  await c.page.keyboard.press('End');
-  await c.wait(800);
-  c.log('Scrolled to bottom using End key');
+  c.log('Scrolled to bottom using mouse wheel');
 }
