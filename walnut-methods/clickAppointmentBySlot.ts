@@ -399,6 +399,68 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
   // The modal calendar uses a fixed-height scrollable container. If the target slot is below
   // the current viewport (e.g. 12:30 PM when only 9–10 AM is visible), the card may not be
   // rendered yet. We scroll by time-position so the card is in the DOM before querying it.
+  //
+  // IMPORTANT: If the target card is already visible in the DOM (all its variants are rendered),
+  // skip pre-scroll entirely to avoid accidentally scrolling the card OUT of the visible area.
+  const cardAlreadyVisible: boolean = await c.page.evaluate(({ f12, f24, s12, s24 }: { f12: string; f24: string; s12: string; s24: string }) => {
+    function collapse(t: string) { return t.replace(/\s+/g, ' ').trim(); }
+    function normR(range: string): string {
+      const parts = range.replace(/\s*[-\u2013\u2014]\s*/g, '|||').split('|||');
+      return parts.map((t: string) => {
+        let s = t.replace(/\b0(\d)(:\d{2})/g, '$1$2');
+        s = s.replace(/\b(\d{1,2}):00(\s*(AM|PM))/gi, '$1$2');
+        s = s.replace(/\b(\d{1,2}):00$/, '$1');
+        return s.trim();
+      }).join(' \u2013 ');
+    }
+    function isM(text: string): boolean {
+      if (text.length > 40) return false;
+      const norm = text.replace(/\s*[-\u2013\u2014]\s*/g, ' \u2013 ');
+      if (norm === f12 || norm === f24) return true;
+      const stripped = norm.replace(/\b0(\d)(:\d{2})/g, '$1$2');
+      if (stripped === f12 || stripped === f24) return true;
+      if (normR(text) === normR(f12) || normR(text) === normR(f24)) return true;
+      return false;
+    }
+    // Also match by start-time only inside data-apt-card spans
+    function toMins(t: string): number {
+      const m24 = t.trim().match(/^(\d{1,2}):(\d{2})$/);
+      if (m24) return parseInt(m24[1], 10) * 60 + parseInt(m24[2], 10);
+      const m12 = t.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+      if (m12) {
+        let h = parseInt(m12[1], 10); const min = parseInt(m12[2], 10);
+        if (m12[3].toUpperCase() === 'PM' && h !== 12) h += 12;
+        if (m12[3].toUpperCase() === 'AM' && h === 12) h = 0;
+        return h * 60 + min;
+      }
+      // Handle "H PM" (no minutes) e.g. "2 PM"
+      const mHour = t.trim().match(/^(\d{1,2})\s*(AM|PM)$/i);
+      if (mHour) {
+        let h = parseInt(mHour[1], 10);
+        if (mHour[2].toUpperCase() === 'PM' && h !== 12) h += 12;
+        if (mHour[2].toUpperCase() === 'AM' && h === 12) h = 0;
+        return h * 60;
+      }
+      return -1;
+    }
+    const targetMins = toMins(s24) >= 0 ? toMins(s24) : toMins(s12);
+    // Check spans, p tags, and data-apt-card cards
+    const allEls = Array.from(document.querySelectorAll('span, p, [data-apt-card] span')) as HTMLElement[];
+    for (const el of allEls) {
+      const text = collapse(el.textContent ?? '');
+      if (text && isM(text)) return true;
+      // Also check start-time-only match within data-apt-card
+      if (targetMins >= 0 && text && text.length <= 12) {
+        const parts = text.split(/\s*[-\u2013\u2014]\s*/);
+        if (parts.length >= 2 && toMins(parts[0].trim()) === targetMins) return true;
+      }
+    }
+    return false;
+  }, { f12: full12, f24: full24, s12: start12, s24: start24 });
+
+  if (cardAlreadyVisible) {
+    ctx.log('Card already visible in DOM — skipping pre-scroll to avoid displacing it.');
+  } else {
   await c.page.evaluate(({ start24, start12 }: { start24: string; start12: string }) => {
 
     // ── Convert time string to minutes since midnight ────────────────────────────────────────────
@@ -539,6 +601,7 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
     scrollContainer.scrollTop = ratio * scrollContainer.scrollHeight - scrollContainer.clientHeight / 2;
 
   }, { start24, start12 });
+  } // end cardAlreadyVisible else block
 
   // Wait for first scroll to settle
   await c.wait(500);
@@ -871,7 +934,8 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
       function isMatch(text: string): boolean {
         // Reject overly long strings — a valid time range "H:MM AM – H:MM AM" is at most ~22 chars.
         // Parent elements that aggregate multiple slots will be much longer; skip them entirely.
-        if (text.length > 30) return false;
+        // Allow up to 40 chars to handle extra whitespace in DOM text nodes.
+        if (text.length > 40) return false;
 
         // ── Exact full-range match (primary) ─────────────────────────────────────────────────────
         if (text === f12 || text === f24) return true;
@@ -1359,6 +1423,78 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
         return markAndScroll(first.target, first.text, first.cardRole);
       }
 
+      // ── Variant E-startOnly: data-apt-card cards matched by start-time only ─────────────────────
+      // Fallback for when the full range text doesn't match due to unexpected formatting.
+      // The card's time span contains e.g. "1:30 PM - 2 PM" — we match just the start time
+      // portion (before the separator) against the target slot's start time in minutes.
+      // This handles all separator styles and :00 omissions without needing normRange.
+      {
+        function startOnlyToMins(t: string): number {
+          const m24 = t.trim().match(/^(\d{1,2}):(\d{2})$/);
+          if (m24) return parseInt(m24[1], 10) * 60 + parseInt(m24[2], 10);
+          const m12 = t.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+          if (m12) {
+            let h = parseInt(m12[1], 10); const min = parseInt(m12[2], 10);
+            if (m12[3].toUpperCase() === 'PM' && h !== 12) h += 12;
+            if (m12[3].toUpperCase() === 'AM' && h === 12) h = 0;
+            return h * 60 + min;
+          }
+          // Handle "H PM" (whole-hour, :00 stripped) e.g. "2 PM"
+          const mHour = t.trim().match(/^(\d{1,2})\s*(AM|PM)$/i);
+          if (mHour) {
+            let h = parseInt(mHour[1], 10);
+            if (mHour[2].toUpperCase() === 'PM' && h !== 12) h += 12;
+            if (mHour[2].toUpperCase() === 'AM' && h === 12) h = 0;
+            return h * 60;
+          }
+          return -1;
+        }
+        function endOnlyToMins(t: string): number { return startOnlyToMins(t); }
+        const targetStartMins = startOnlyToMins(s24) >= 0 ? startOnlyToMins(s24) : startOnlyToMins(s12);
+        const targetEndMins   = endOnlyToMins(e24)   >= 0 ? endOnlyToMins(e24)   : endOnlyToMins(e12);
+
+        if (targetStartMins >= 0) {
+          const aptCardsE = Array.from(document.querySelectorAll('[data-apt-card]')) as HTMLElement[];
+          const matchedStartOnly: { target: HTMLElement; text: string; cardRole: string }[] = [];
+
+          for (const card of aptCardsE) {
+            // Find the time span (leading-tight / font-medium / text-[10px])
+            const timeSpans = Array.from(card.querySelectorAll(
+              'span[class*="leading-tight"], span[class*="font-medium"], span[class*="text-[10px]"]'
+            )) as HTMLElement[];
+            for (const span of timeSpans) {
+              const raw = collapse(span.textContent ?? '');
+              if (!raw || raw.length > 40) continue;
+              // Split on any separator (hyphen, en-dash, em-dash)
+              const sepParts = raw.split(/\s*[-\u2013\u2014]\s*/);
+              if (sepParts.length < 2) continue;
+              const cardStartMins = startOnlyToMins(sepParts[0].trim());
+              const cardEndMins   = endOnlyToMins(sepParts[sepParts.length - 1].trim());
+              if (cardStartMins < 0) continue;
+              // Match by start AND end time (both in minutes)
+              const startMatch = (cardStartMins === targetStartMins);
+              const endMatch   = targetEndMins < 0 || (cardEndMins === targetEndMins);
+              if (startMatch && endMatch) {
+                const target = findClickable(card);
+                const cardRole = extractCardRole(target);
+                matchedStartOnly.push({ target, text: raw, cardRole });
+                break;
+              }
+            }
+          }
+          if (matchedStartOnly.length > 0) {
+            if (roleFilter) {
+              const rm = matchedStartOnly.find(
+                c => c.cardRole.trim().toLowerCase() === roleFilter.toLowerCase()
+              );
+              if (rm) return markAndScroll(rm.target, rm.text, rm.cardRole);
+            }
+            const first = matchedStartOnly[0];
+            return markAndScroll(first.target, first.text, first.cardRole);
+          }
+        }
+      }
+
       // ── Variant E3: week/day-view card — same inner structure as E2 but NO data-apt-card attr ────
       // Same card inner structure as E2 but the outer wrapper does not have [data-apt-card].
       // Calendar card DOM (from week-view screenshot):
@@ -1641,12 +1777,31 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
                   .replace(/\s*[-\u2013\u2014]\s*/g, ' \u2013 ')
                   .replace(/\b0(\d)(:\d{2})/g, '$1$2');
         }
+        // normRangeXP is defined below — forward-declare a stub here so the <p> scan can use it.
+        // (The full definition appears right after this block.)
+        function normRangeXPStub(range: string): string {
+          const pts = range.replace(/\s*[-\u2013\u2014]\s*/g, '|||').split('|||');
+          return pts.map((t: string) => {
+            let s = t.replace(/\b0(\d)(:\d{2})/g, '$1$2');
+            s = s.replace(/\b(\d{1,2}):00(\s*(AM|PM))/gi, '$1$2');
+            s = s.replace(/\b(\d{1,2}):00$/, '$1');
+            return s.trim();
+          }).join(' \u2013 ');
+        }
+        function isMatchP(text: string): boolean {
+          if (text.length > 40) return false;
+          const norm = text.replace(/\s*[-\u2013\u2014]\s*/g, ' \u2013 ');
+          if (norm === f12 || norm === f24) return true;
+          const stripped = norm.replace(/\b0(\d)(:\d{2})/g, '$1$2');
+          if (stripped === f12 || stripped === f24) return true;
+          if (normRangeXPStub(text) === normRangeXPStub(f12) || normRangeXPStub(text) === normRangeXPStub(f24)) return true;
+          return false;
+        }
         const allPs = Array.from(document.querySelectorAll('p')) as HTMLElement[];
         const matchedPs: { target: HTMLElement; text: string; cardRole: string }[] = [];
         for (const p of allPs) {
-          const norm = collapseAndStrip(p.textContent ?? '');
-          if (norm === f12 || norm === f24) {
-            const text = (p.textContent ?? '').replace(/\s+/g, ' ').trim();
+          const text = (p.textContent ?? '').replace(/\s+/g, ' ').trim();
+          if (isMatchP(text)) {
             const target = findClickable(p);
             const cardRole = extractCardRole(target);
             matchedPs.push({ target, text, cardRole });
@@ -1661,22 +1816,82 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           return markAndScroll2(fp.target, fp.text, fp.cardRole);
         }
 
-        // Variant E fallback: data-apt-card absolute-positioned cards with time in <span>
+        // ── XPath fallback: Variant E — data-apt-card spans (with normRange + minute matching) ──
+        // collapseAndStrip alone can't handle :00-omission or separator variants, so we use
+        // normRange (same logic as the primary scan) and minute-based fallback here too.
+        function normRangeXP(range: string): string {
+          const pts = range.replace(/\s*[-\u2013\u2014]\s*/g, '|||').split('|||');
+          return pts.map((t: string) => {
+            let s = t.replace(/\b0(\d)(:\d{2})/g, '$1$2');
+            s = s.replace(/\b(\d{1,2}):00(\s*(AM|PM))/gi, '$1$2');
+            s = s.replace(/\b(\d{1,2}):00$/, '$1');
+            return s.trim();
+          }).join(' \u2013 ');
+        }
+        function isMatchXP(text: string): boolean {
+          if (text.length > 40) return false;
+          const norm = text.replace(/\s*[-\u2013\u2014]\s*/g, ' \u2013 ');
+          if (norm === f12 || norm === f24) return true;
+          const stripped = norm.replace(/\b0(\d)(:\d{2})/g, '$1$2');
+          if (stripped === f12 || stripped === f24) return true;
+          if (normRangeXP(text) === normRangeXP(f12) || normRangeXP(text) === normRangeXP(f24)) return true;
+          return false;
+        }
+        function toMinsXP(t: string): number {
+          const m24 = t.trim().match(/^(\d{1,2}):(\d{2})$/);
+          if (m24) return parseInt(m24[1], 10) * 60 + parseInt(m24[2], 10);
+          const m12 = t.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+          if (m12) {
+            let h = parseInt(m12[1], 10); const min = parseInt(m12[2], 10);
+            if (m12[3].toUpperCase() === 'PM' && h !== 12) h += 12;
+            if (m12[3].toUpperCase() === 'AM' && h === 12) h = 0;
+            return h * 60 + min;
+          }
+          const mH = t.trim().match(/^(\d{1,2})\s*(AM|PM)$/i);
+          if (mH) {
+            let h = parseInt(mH[1], 10);
+            if (mH[2].toUpperCase() === 'PM' && h !== 12) h += 12;
+            if (mH[2].toUpperCase() === 'AM' && h === 12) h = 0;
+            return h * 60;
+          }
+          return -1;
+        }
+        const tgtStartMins = toMinsXP(s24) >= 0 ? toMinsXP(s24) : toMinsXP(s12);
+        const tgtEndMins   = toMinsXP(e24) >= 0 ? toMinsXP(e24) : toMinsXP(e12);
+
         const aptCards2 = Array.from(document.querySelectorAll('[data-apt-card]')) as HTMLElement[];
         const matchedApt2: { target: HTMLElement; text: string; cardRole: string }[] = [];
         for (const card of aptCards2) {
-          const spans2 = Array.from(card.querySelectorAll('span')) as HTMLElement[];
-          for (const span of spans2) {
-            // Only leaf spans — avoids parent spans accumulating text from multiple cards
-            if (span.querySelector('*') !== null) continue;
-            const norm2 = collapseAndStrip(span.textContent ?? '');
-            if (norm2 === f12 || norm2 === f24) {
+          const allSpans2 = Array.from(card.querySelectorAll('span, p')) as HTMLElement[];
+          let matched = false;
+          for (const el of allSpans2) {
+            const raw2 = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+            if (!raw2 || raw2.length > 40) continue;
+            // Primary: normRange match
+            if (isMatchXP(raw2)) {
               const target = findClickable(card);
               const cardRole = extractCardRole(target);
-              matchedApt2.push({ target, text: norm2, cardRole });
-              break;
+              matchedApt2.push({ target, text: raw2, cardRole });
+              matched = true; break;
+            }
+            // Fallback: minute-based match (handles :00 stripped to "2 PM", any separator)
+            if (tgtStartMins >= 0) {
+              const sepParts2 = raw2.split(/\s*[-\u2013\u2014]\s*/);
+              if (sepParts2.length >= 2) {
+                const cardStart = toMinsXP(sepParts2[0].trim());
+                const cardEnd   = toMinsXP(sepParts2[sepParts2.length - 1].trim());
+                const startOk = (cardStart === tgtStartMins);
+                const endOk   = tgtEndMins < 0 || (cardEnd === tgtEndMins);
+                if (startOk && endOk) {
+                  const target = findClickable(card);
+                  const cardRole = extractCardRole(target);
+                  matchedApt2.push({ target, text: raw2, cardRole });
+                  matched = true; break;
+                }
+              }
             }
           }
+          if (matched) continue; // already pushed, move to next card
         }
         if (matchedApt2.length > 0) {
           if (roleFilter) {
@@ -1685,6 +1900,44 @@ export async function clickAppointmentBySlot(ctx: WalnutContext) {
           }
           const fa = matchedApt2[0];
           return markAndScroll2(fa.target, fa.text, fa.cardRole);
+        }
+
+        // ── XPath fallback: minute-based scan across ALL cursor-pointer cards ─────────────────────
+        // Last resort for any DOM variant where time is in <p> or <span> but normRange still fails.
+        // Scans every cursor-pointer card and matches by parsed start+end time in minutes.
+        if (tgtStartMins >= 0) {
+          const allClickables = Array.from(document.querySelectorAll('[class*="cursor-pointer"]')) as HTMLElement[];
+          const minuteMatched: { target: HTMLElement; text: string; cardRole: string }[] = [];
+          for (const card of allClickables) {
+            const innerEls = Array.from(card.querySelectorAll('p, span')) as HTMLElement[];
+            for (const el of innerEls) {
+              const isLeafEl = el.querySelector('*') === null;
+              const rawT = isLeafEl
+                ? (el.textContent ?? '').replace(/\s+/g, ' ').trim()
+                : Array.from(el.childNodes).filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent ?? '').join(' ').replace(/\s+/g, ' ').trim();
+              if (!rawT || rawT.length > 40) continue;
+              const sepPts = rawT.split(/\s*[-\u2013\u2014]\s*/);
+              if (sepPts.length < 2) continue;
+              const cStart = toMinsXP(sepPts[0].trim());
+              const cEnd   = toMinsXP(sepPts[sepPts.length - 1].trim());
+              if (cStart < 0) continue;
+              const sOk = (cStart === tgtStartMins);
+              const eOk = tgtEndMins < 0 || (cEnd === tgtEndMins);
+              if (sOk && eOk) {
+                const cardRole = extractCardRole(card);
+                minuteMatched.push({ target: card, text: rawT, cardRole });
+                break;
+              }
+            }
+          }
+          if (minuteMatched.length > 0) {
+            if (roleFilter) {
+              const rm = minuteMatched.find(c => c.cardRole.trim().toLowerCase() === roleFilter.toLowerCase());
+              if (rm) return markAndScroll2(rm.target, rm.text, rm.cardRole);
+            }
+            const fm = minuteMatched[0];
+            return markAndScroll2(fm.target, fm.text, fm.cardRole);
+          }
         }
 
         // Variant D fallback: flex row with two time span labels
