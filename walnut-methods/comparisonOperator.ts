@@ -91,11 +91,23 @@ export async function comparisonOperator(ctx: WalnutContext) {
       break;
 
     case 'contains':
-      result = actualNorm.toLowerCase().includes(expectedNorm.toLowerCase());
+      // Check both directions: actual contains expected OR expected contains actual.
+      // This handles cases where the variable order is reversed (e.g. a short name vs a long
+      // cancellation message that includes the name).
+      result = actualNorm.toLowerCase().includes(expectedNorm.toLowerCase())
+            || expectedNorm.toLowerCase().includes(actualNorm.toLowerCase());
+      if (result) {
+        const direction = actualNorm.toLowerCase().includes(expectedNorm.toLowerCase())
+          ? `"${actualNorm}" contains "${expectedNorm}"`
+          : `"${expectedNorm}" contains "${actualNorm}" (reverse match)`;
+        c.log(`contains matched: ${direction}`);
+      }
       break;
 
     case 'does_not_contain':
-      result = !actualNorm.toLowerCase().includes(expectedNorm.toLowerCase());
+      // Neither direction should contain the other
+      result = !actualNorm.toLowerCase().includes(expectedNorm.toLowerCase())
+            && !expectedNorm.toLowerCase().includes(actualNorm.toLowerCase());
       break;
 
     default:
