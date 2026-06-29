@@ -152,20 +152,26 @@ export async function clickAvailableTimeSlotPatient(ctx: WalnutContext) {
     if (startMin === null) return true; // unparseable → allow
 
     if (selectedDateMidnight === null) {
-      ctx.log(`No date detected — allowing slot "${slotText}"`);
-      return true; // safe fallback
+      // Date could not be detected — apply current time filter as best-effort:
+      // skip slots before now, allow everything else.
+      if (startMin <= nowMinutes) {
+        ctx.log(`Skip "${slotText}" — before current time (no date detected)`);
+        return false;
+      }
+      return true;
     }
 
-    // If today is selected: skip slots that are already in the past
-    // (slot start time is before current system time)
+    // Today is selected: skip past slots (before current system time)
+    // Example: current time 07:28 → skip 07:00, allow 07:30
     if (isToday && startMin <= nowMinutes) {
-      ctx.log(`Skip "${slotText}" — slot at ${Math.floor(startMin/60)}:${String(startMin%60).padStart(2,'0')} is in the past (now ${Math.floor(nowMinutes/60)}:${String(nowMinutes%60).padStart(2,'0')})`);
+      ctx.log(`Skip "${slotText}" — ${Math.floor(startMin/60)}:${String(startMin%60).padStart(2,'0')} is in the past (now ${Math.floor(nowMinutes/60)}:${String(nowMinutes%60).padStart(2,'0')})`);
       return false;
     }
 
+    // Future date selected: apply 48h booking policy cutoff only
+    // Do NOT apply current time filter — 07:30 on July 3 is valid even if now is 07:28
     const slotDt = new Date(selectedDateMidnight.getTime());
     slotDt.setHours(Math.floor(startMin / 60), startMin % 60, 0, 0);
-
     const ok = slotDt.getTime() > cutoffDate.getTime();
     if (!ok) ctx.log(`Skip "${slotText}" — ${slotDt.toISOString()} within 48h cutoff`);
     return ok;
