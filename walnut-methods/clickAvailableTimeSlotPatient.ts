@@ -87,12 +87,14 @@ export async function clickAvailableTimeSlotPatient(ctx: WalnutContext) {
       ` or (contains(normalize-space(.),'${label}') and not(.//span))` +
     `]`;
 
-  // XPath for clickable (non-disabled) slots only — used for the click action
+  // XPath for visible time-slot buttons — used for the click action.
+  // NOTE: We do NOT filter by @disabled here because HHCS marks slots with the @disabled
+  // attribute purely for booking-policy styling, even when the slot is visually available.
+  // We use { force: true } on the Playwright click to bypass the disabled guard.
   const availableSlotXpath =
     `//button[` +
-      `not(@disabled)` +
-      ` and not(contains(@class,'cursor-not-allowed'))` +
-      ` and (contains(@class,'cursor-pointer') or contains(@class,'bg-white') or contains(@class,'hover:bg-gray-50'))` +
+      `not(contains(@class,'cursor-not-allowed'))` +
+      ` and (contains(@class,'cursor-pointer') or contains(@class,'bg-white') or contains(@class,'hover:bg-gray-50') or contains(normalize-space(text()),':'))` +
       ` and contains(normalize-space(text()),':')` +
       ` and not(contains(@class,'flex-1'))` +
     `]`;
@@ -506,7 +508,7 @@ export async function clickAvailableTimeSlotPatient(ctx: WalnutContext) {
     ctx.log(`Found bookable slot in "${section}": "${slotResult.text}" — clicking...`);
 
     const slotXpathIndexed = `(${availableSlotXpath})[${slotResult.index + 1}]`;
-    await c.page.locator(`xpath=${slotXpathIndexed}`).first().click();
+    await c.page.locator(`xpath=${slotXpathIndexed}`).first().click({ force: true });
 
     ctx.log(`Clicked time slot: "${slotResult.text}"`);
 
