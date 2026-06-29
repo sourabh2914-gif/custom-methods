@@ -458,102 +458,185 @@ export async function clickAvailableTimeSlot(ctx: WalnutContext) {
     ctx.log('No future afternoon/evening slots found — $[lastSlot] not set');
   }
 
-  // ── Phase 2: Click logic — first future non-disabled slot (Morning → Afternoon → Evening) ────
+  // ── Helper: try to click the first available slot across all sections on the current date ────────
+  // Returns the clicked slot text if successful, or null if no clickable slots found.
+  async function tryClickSlotOnCurrentDate(): Promise<string | null> {
+    for (const section of sections) {
+      ctx.log(`Checking section: ${section}`);
+
+      const tabXpath = findTabXpath(section);
+
+      // Inspect the tab: exists? disabled?
+      const tabState: { exists: boolean; isDisabled: boolean } =
+        await c.page.evaluate((xp: string) => {
+          const result = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+          const el = result.singleNodeValue as HTMLElement | null;
+          if (!el) return { exists: false, isDisabled: false };
+          const isDisabled = el.hasAttribute('disabled');
+          return { exists: true, isDisabled };
+        }, tabXpath);
+
+      if (!tabState.exists) {
+        ctx.log(`Section "${section}" tab not found — skipping`);
+        continue;
+      }
+
+      if (tabState.isDisabled) {
+        ctx.log(`Section "${section}" is disabled (no slots available) — skipping`);
+        continue;
+      }
+
+      // Use ONLY availableSlotXpath — excludes @disabled, cursor-not-allowed,
+      // opacity-50/40, line-through (booked/faded slots).
+      const visibleSlots = await collectSlotsFromSection(section, availableSlotXpath);
+      ctx.log(`Available slots in "${section}": ${visibleSlots.length}`);
+
+      if (visibleSlots.length === 0) {
+        ctx.log(`No clickable slots in "${section}" — moving to next section`);
+        continue;
+      }
+
+      const slotText = visibleSlots[0];
+      ctx.log(`Found available slot in "${section}": "${slotText}" — clicking...`);
+
+      // Click by normalized text match to avoid stale positional index issues.
+      const escapedText = slotText.replace(/'/g, "', \"'\", '");
+      const slotXpathByText =
+        `//button[` +
+          `not(contains(@class,'flex-1'))` +
+          ` and not(contains(@class,'bg-blue-500'))` +
+          ` and not(contains(@class,'bg-blue-600'))` +
+          ` and not(contains(@class,'bg-blue-700'))` +
+          ` and not(contains(@class,'bg-primary'))` +
+          ` and not(contains(@class,'bg-black'))` +
+          ` and not(contains(@class,'bg-gray-900'))` +
+          ` and not(contains(@class,'opacity-50'))` +
+          ` and not(contains(@class,'opacity-40'))` +
+          ` and not(contains(@class,'line-through'))` +
+          ` and not(contains(@class,'bg-[#3279AD]'))` +
+          ` and normalize-space(.)='${escapedText}'` +
+        `]`;
+
+      await c.page.locator(`xpath=${slotXpathByText}`).first().click({ force: true });
+      await c.wait(800);
+
+      ctx.log(`Clicked time slot: "${slotText}"`);
+      return slotText;
+    }
+    return null; // no clickable slot found on this date
+  }
+
+  // ── Helper: advance the calendar to the next date ─────────────────────────────────────────────
+  // Clicks the NEXT available date button after the currently-selected one.
+  // Returns true if a next date was found and clicked, false otherwise.
+  async function advanceToNextDate(): Promise<boolean> {
+    return await c.page.evaluate((): boolean => {
+      // Find all date buttons (1–31) in the calendar
+      const allBtns = Array.from(document.querySelectorAll('button')) as HTMLElement[];
+      const dateBtns = allBtns.filter(btn => {
+        const txt = (btn.textContent ?? '').trim();
+        const n = parseInt(txt, 10);
+        return !isNaN(n) && n >= 1 && n <= 31 && txt === String(n);
+      });
+
+      if (dateBtns.length === 0) return false;
+
+      // Find the currently selected button (dark bg, aria-pressed, or text-white + rounded-full)
+      let selectedIdx = -1;
+      for (let i = 0; i < dateBtns.length; i++) {
+        const btn = dateBtns[i];
+        const cls = btn.className || '';
+        const isAriaSelected = btn.getAttribute('aria-pressed') === 'true' ||
+                               btn.getAttribute('aria-selected') === 'true';
+        const hasDarkClass = cls.includes('bg-black') || cls.includes('bg-gray-900') ||
+                             cls.includes('bg-gray-800') || cls.includes('bg-primary') ||
+                             cls.includes('bg-blue-600') || cls.includes('bg-blue-500') ||
+                             cls.includes('bg-blue-700') || /bg-\[#[0-9a-fA-F]{3,8}\]/.test(cls);
+        const hasTextWhiteRounded = cls.includes('text-white') && cls.includes('rounded-full') &&
+                                    !cls.includes('bg-transparent') && !cls.includes('bg-white');
+        if (isAriaSelected || hasDarkClass || hasTextWhiteRounded) {
+          selectedIdx = i;
+          break;
+        }
+      }
+
+      // If we couldn't detect selected, try computed style
+      if (selectedIdx === -1) {
+        for (let i = 0; i < dateBtns.length; i++) {
+          const bg = window.getComputedStyle(dateBtns[i]).backgroundColor;
+          if (!bg || bg === 'transparent' || bg === 'rgba(0, 0, 0, 0)') continue;
+          const m = bg.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+          if (!m) continue;
+          const r = parseInt(m[1], 10), g = parseInt(m[2], 10), b = parseInt(m[3], 10);
+          if (r > 220 && g > 220 && b > 220) continue; // skip white/near-white
+          selectedIdx = i;
+          break;
+        }
+      }
+
+      // Click the next date button after the selected one, skipping disabled buttons
+      const startIdx = selectedIdx >= 0 ? selectedIdx + 1 : 0;
+      for (let i = startIdx; i < dateBtns.length; i++) {
+        const btn = dateBtns[i];
+        if (btn.hasAttribute('disabled')) continue;
+        const cls = btn.className || '';
+        if (cls.includes('cursor-not-allowed') || cls.includes('opacity-30') ||
+            cls.includes('opacity-40') || cls.includes('opacity-50')) continue;
+        btn.click();
+        return true;
+      }
+
+      return false; // no next date available (end of calendar month)
+    });
+  }
+
+  // ── Phase 2: Click logic — try current date, then advance calendar if all slots are 48h-locked ─
 
   ctx.log('Phase 2: Clicking first available (non-disabled) future slot...');
 
-  for (const section of sections) {
-    ctx.log(`Checking section: ${section}`);
-
-    const tabXpath = findTabXpath(section);
-
-    // Inspect the tab: exists? disabled? active?
-    const tabState: { exists: boolean; isDisabled: boolean; isActive: boolean } =
-      await c.page.evaluate((xp: string) => {
-        const result = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
-        const el = result.singleNodeValue as HTMLElement | null;
-        if (!el) return { exists: false, isDisabled: false, isActive: false };
-
-        const isDisabled = el.hasAttribute('disabled');
-        const classes = el.className || '';
-
-        // Active tab detection — just check it exists; always click to ensure it's active.
-        // isActive detection is unreliable across variants, so we always click the tab
-        // and wait for it to render its slots.
-        return { exists: true, isDisabled, isActive: false };
-      }, tabXpath);
-
-    if (!tabState.exists) {
-      ctx.log(`Section "${section}" tab not found — skipping`);
-      continue;
-    }
-
-    if (tabState.isDisabled) {
-      ctx.log(`Section "${section}" is disabled (no slots available) — skipping`);
-      continue;
-    }
-
-    // Phase 2: use ONLY availableSlotXpath — excludes @disabled, cursor-not-allowed,
-    // opacity-50/40, line-through (booked/faded slots).
-    // Do NOT fall back to allSlotsXpath — it includes faded/booked slots and would
-    // cause Morning to always win, preventing the loop from reaching Afternoon/Evening.
-    const visibleSlots = await collectSlotsFromSection(section, availableSlotXpath);
-    ctx.log(`Phase 2 available slots in "${section}": ${visibleSlots.length}`);
-
-    if (visibleSlots.length === 0) {
-      ctx.log(`No clickable slots in "${section}" — moving to next section`);
-      continue;
-    }
-
-    const futureSlots = visibleSlots.map((text, index) => ({ text, index }));
-    ctx.log(`Phase 2 slots in "${section}": ${futureSlots.length} (visibility-scoped, no time filter)`);
-
-    const slotResult = futureSlots[0];
-
-    ctx.log(`Found future available slot in "${section}": "${slotResult.text}" — clicking...`);
-
-    // Click by normalized text match to avoid stale positional index issues.
-    // Escape any single quotes in the slot text for XPath.
-    const escapedText = slotResult.text.replace(/'/g, "', \"'\", '");
-    // Build a minimal XPath: just match by text, exclude obvious selected/booked state.
-    // Do NOT exclude @disabled — some apps mark slots disabled in the DOM even when
-    // they are visually clickable (future-date slots). Use { force: true } to bypass
-    // Playwright's disabled/visibility checks and dispatch the click directly.
-    const slotXpathByText =
-      `//button[` +
-        `not(contains(@class,'flex-1'))` +
-        ` and not(contains(@class,'bg-blue-500'))` +
-        ` and not(contains(@class,'bg-blue-600'))` +
-        ` and not(contains(@class,'bg-blue-700'))` +
-        ` and not(contains(@class,'bg-primary'))` +
-        ` and not(contains(@class,'bg-black'))` +
-        ` and not(contains(@class,'bg-gray-900'))` +
-        ` and not(contains(@class,'opacity-50'))` +
-        ` and not(contains(@class,'opacity-40'))` +
-        ` and not(contains(@class,'line-through'))` +
-        ` and not(contains(@class,'bg-[#3279AD]'))` +  // exclude Variant C selected state
-        ` and normalize-space(.)='${escapedText}'` +
-      `]`;
-
-    await c.page.locator(`xpath=${slotXpathByText}`).first().click({ force: true });
-
-    // Wait briefly for the app to register the click and update slot states
-    await c.wait(800);
-
-    ctx.log(`Clicked time slot: "${slotResult.text}"`);
-
+  // Try the currently selected date first
+  const clickedSlot = await tryClickSlotOnCurrentDate();
+  if (clickedSlot !== null) {
     if (outputVar) {
-      ctx.setVariable(outputVar, slotResult.text);
-      ctx.log(`Stored "${slotResult.text}" → $[${outputVar}]`);
+      ctx.setVariable(outputVar, clickedSlot);
+      ctx.log(`Stored "${clickedSlot}" → $[${outputVar}]`);
+    }
+    return;
+  }
+
+  // No slots found on current date — could be a booking policy window (e.g. 48-hour rule).
+  // Advance through the calendar day-by-day until we find a date with bookable slots.
+  ctx.log('No clickable slots on current date — advancing calendar to find next bookable date...');
+
+  const maxDaysToAdvance = 30; // safety cap — never loop more than 30 days forward
+  for (let dayOffset = 0; dayOffset < maxDaysToAdvance; dayOffset++) {
+    const advanced = await advanceToNextDate();
+    if (!advanced) {
+      ctx.log('No more dates available in this calendar month — stopping');
+      break;
     }
 
-    return; // Done
+    // Wait for the slot panel to reload after clicking the new date
+    await c.wait(1000);
+    ctx.log(`Advanced to next date (attempt ${dayOffset + 1}) — checking for slots...`);
+
+    const slotOnNewDate = await tryClickSlotOnCurrentDate();
+    if (slotOnNewDate !== null) {
+      ctx.log(`Found and clicked slot "${slotOnNewDate}" on advanced date`);
+      if (outputVar) {
+        ctx.setVariable(outputVar, slotOnNewDate);
+        ctx.log(`Stored "${slotOnNewDate}" → $[${outputVar}]`);
+      }
+      return;
+    }
+
+    ctx.log(`Still no clickable slots on this date — advancing further...`);
   }
 
   throw new Error(
     `No bookable time slots found in Morning, Afternoon, or Evening. ` +
-    `Either all slots are booked/disabled or all available slots are in the past ` +
-    `(current system time: ${Math.floor(nowMinutes / 60)}:${String(nowMinutes % 60).padStart(2, '0')}).` +
-    (isToday ? '' : ' Note: a future date was detected so time filter was disabled.')
+    `All available slots are within the 48-hour booking policy window. ` +
+    `Earliest bookable datetime: ${new Date(Date.now() + 48 * 60 * 60 * 1000).toLocaleString()}. ` +
+    `Please select a date at least 48 hours from now (${new Date().toISOString()}).`
   );
 }
