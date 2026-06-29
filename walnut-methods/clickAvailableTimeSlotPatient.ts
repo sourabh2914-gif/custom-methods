@@ -136,6 +136,17 @@ export async function clickAvailableTimeSlotPatient(ctx: WalnutContext) {
     return null;
   }
 
+  // Current system time in minutes since midnight (for today's date check)
+  const nowMinutes = nowDate.getHours() * 60 + nowDate.getMinutes();
+
+  // Is the selected calendar date today?
+  const isToday = selectedDateInfo !== null &&
+    selectedDateInfo.day   === nowDate.getDate() &&
+    selectedDateInfo.month === nowDate.getMonth() + 1 &&
+    selectedDateInfo.year  === nowDate.getFullYear();
+
+  ctx.log(`isToday: ${isToday}, nowMinutes: ${nowMinutes}`);
+
   function isBeyondCutoff(slotText: string): boolean {
     const startMin = parseStartMinutes(slotText);
     if (startMin === null) return true; // unparseable → allow
@@ -143,6 +154,13 @@ export async function clickAvailableTimeSlotPatient(ctx: WalnutContext) {
     if (selectedDateMidnight === null) {
       ctx.log(`No date detected — allowing slot "${slotText}"`);
       return true; // safe fallback
+    }
+
+    // If today is selected: skip slots that are already in the past
+    // (slot start time is before current system time)
+    if (isToday && startMin <= nowMinutes) {
+      ctx.log(`Skip "${slotText}" — slot at ${Math.floor(startMin/60)}:${String(startMin%60).padStart(2,'0')} is in the past (now ${Math.floor(nowMinutes/60)}:${String(nowMinutes%60).padStart(2,'0')})`);
+      return false;
     }
 
     const slotDt = new Date(selectedDateMidnight.getTime());
