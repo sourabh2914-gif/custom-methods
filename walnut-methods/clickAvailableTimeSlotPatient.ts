@@ -151,30 +151,26 @@ export async function clickAvailableTimeSlotPatient(ctx: WalnutContext) {
     const startMin = parseStartMinutes(slotText);
     if (startMin === null) return true; // unparseable → allow
 
-    if (selectedDateMidnight === null) {
-      // Date could not be detected — apply current time filter as best-effort:
-      // skip slots before now, allow everything else.
-      if (startMin <= nowMinutes) {
-        ctx.log(`Skip "${slotText}" — before current time (no date detected)`);
-        return false;
-      }
-      return true;
+    // ── Case 1: Confirmed future date (isToday === false, date detected) ────────────────────────
+    // Only the 48h booking policy applies. Do NOT filter by current time — 10:30 AM on July 3rd
+    // is a valid slot even if it is currently 4:42 PM today.
+    if (selectedDateMidnight !== null && !isToday) {
+      const slotDt = new Date(selectedDateMidnight.getTime());
+      slotDt.setHours(Math.floor(startMin / 60), startMin % 60, 0, 0);
+      const ok = slotDt.getTime() > cutoffDate.getTime();
+      if (!ok) ctx.log(`Skip "${slotText}" — ${slotDt.toISOString()} within 48h cutoff`);
+      return ok;
     }
 
-    // Today is selected: skip past slots (before current system time)
-    // Example: current time 07:28 → skip 07:00, allow 07:30
-    if (isToday && startMin <= nowMinutes) {
-      ctx.log(`Skip "${slotText}" — ${Math.floor(startMin/60)}:${String(startMin%60).padStart(2,'0')} is in the past (now ${Math.floor(nowMinutes/60)}:${String(nowMinutes%60).padStart(2,'0')})`);
+    // ── Case 2: Today selected, or date detection failed ────────────────────────────────────────
+    // Apply current-time filter: skip slots at or before the current system time.
+    // Example: now = 4:42 PM (nowMinutes=1002) → skip 10:30 AM (630), allow 5:00 PM (1020).
+    if (startMin <= nowMinutes) {
+      ctx.log(`Skip "${slotText}" — ${Math.floor(startMin/60)}:${String(startMin%60).padStart(2,'0')} is at or before current time ${Math.floor(nowMinutes/60)}:${String(nowMinutes%60).padStart(2,'0')}`);
       return false;
     }
 
-    // Future date selected: apply 48h booking policy cutoff only
-    // Do NOT apply current time filter — 07:30 on July 3 is valid even if now is 07:28
-    const slotDt = new Date(selectedDateMidnight.getTime());
-    slotDt.setHours(Math.floor(startMin / 60), startMin % 60, 0, 0);
-    const ok = slotDt.getTime() > cutoffDate.getTime();
-    if (!ok) ctx.log(`Skip "${slotText}" — ${slotDt.toISOString()} within 48h cutoff`);
-    return ok;
+    return true;
   }
 
   // ── Tab + Slot Helpers ──────────────────────────────────────────────────────────────────────────
