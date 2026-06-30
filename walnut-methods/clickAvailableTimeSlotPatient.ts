@@ -9,181 +9,158 @@ import type { WalnutContext } from './walnut';
  * category: Forms
  */
 export async function clickAvailableTimeSlotPatient(ctx: WalnutContext) {
-  // ctx.args[0] = selectedSlot output variable name
-  // ctx.args[1] = firstSlot output variable name
-  // ctx.args[2] = lastSlot output variable name
-  //
-  // 48-HOUR POLICY: only click slots whose datetime > now + 48h.
-  // If the selected calendar date cannot be detected, allow ALL slots (safe fallback).
-  // HHCS sets disabled + cursor-not-allowed on slot/tab buttons for styling — use force:true.
-
   const c = ctx as any;
   const outputVar    = ctx.args[0];
   const firstSlotVar = ctx.args[1];
   const lastSlotVar  = ctx.args[2];
 
-  // ── 48h Cutoff ──────────────────────────────────────────────────────────────────────────────────
-
-  const nowDate    = new Date();
-  const cutoffDate = new Date(nowDate.getTime() + 48 * 60 * 60 * 1000);
-
-  ctx.log(`System time: ${nowDate.toISOString()}`);
-  ctx.log(`48h cutoff : ${cutoffDate.toISOString()}`);
-
-  // ── Calendar Date Detection ─────────────────────────────────────────────────────────────────────
-  // Reads month/year from the "JUL 2026" header and the highlighted day button.
-
-  const selectedDateInfo: { day: number; month: number; year: number } | null =
-    await c.page.evaluate((): { day: number; month: number; year: number } | null => {
-      const MONTHS: Record<string, number> = {
-        january:1, february:2, march:3, april:4, may:5, june:6,
-        july:7, august:8, september:9, october:10, november:11, december:12,
-        jan:1, feb:2, mar:3, apr:4, jun:6, jul:7, aug:8, sep:9, oct:10, nov:11, dec:12,
-      };
-
-      function parseMonthYear(txt: string): { month: number; year: number } | null {
-        const m = txt.match(/([A-Za-z]+)\s+(\d{4})/);
-        if (m) {
-          const mon = MONTHS[m[1].toLowerCase()];
-          const yr  = parseInt(m[2], 10);
-          if (mon && yr) return { month: mon, year: yr };
-        }
-        return null;
-      }
-
-      // Find "JUL 2026" style header
-      let calMY: { month: number; year: number } | null = null;
-      const allEls = Array.from(document.querySelectorAll('*')) as HTMLElement[];
-      for (const el of allEls) {
-        const txt = (el.textContent ?? '').trim();
-        const p = parseMonthYear(txt);
-        // Accept only if this element is a short header (not a long paragraph)
-        if (p && txt.length < 30) { calMY = p; break; }
-      }
-
-      // Find highlighted day button
-      let activeDay: number | null = null;
-
-      // Strategy 1: aria-pressed / aria-selected
-      for (const sel of ['button[aria-pressed="true"]', 'button[aria-selected="true"]', '[role="gridcell"][aria-selected="true"]']) {
-        const el = document.querySelector(sel) as HTMLElement | null;
-        if (el) {
-          const n = parseInt((el.textContent ?? '').trim(), 10);
-          if (!isNaN(n) && n >= 1 && n <= 31) { activeDay = n; break; }
-        }
-      }
-
-      // Strategy 2: dark bg Tailwind class
-      if (activeDay === null) {
-        for (const btn of Array.from(document.querySelectorAll('button')) as HTMLElement[]) {
-          const txt = (btn.textContent ?? '').trim();
-          const num = parseInt(txt, 10);
-          if (isNaN(num) || num < 1 || num > 31 || txt !== String(num)) continue;
-          const cls = btn.className || '';
-          if (cls.includes('bg-black') || cls.includes('bg-primary') || cls.includes('bg-blue') ||
-              cls.includes('bg-gray-900') ||
-              (cls.includes('rounded-full') && cls.includes('text-white'))) {
-            activeDay = num; break;
-          }
-        }
-      }
-
-      // Strategy 3: computed dark background
-      if (activeDay === null) {
-        for (const btn of Array.from(document.querySelectorAll('button')) as HTMLElement[]) {
-          const txt = (btn.textContent ?? '').trim();
-          const num = parseInt(txt, 10);
-          if (isNaN(num) || num < 1 || num > 31 || txt !== String(num)) continue;
-          const bg = window.getComputedStyle(btn).backgroundColor;
-          const m = bg.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
-          if (!m) continue;
-          const r = parseInt(m[1],10), g = parseInt(m[2],10), b = parseInt(m[3],10);
-          if (r < 210 || g < 210 || b < 210) { activeDay = num; break; }
-        }
-      }
-
-      if (activeDay === null) return null;
-      if (calMY) return { day: activeDay, month: calMY.month, year: calMY.year };
-
-      const now = new Date();
-      return { day: activeDay, month: now.getMonth() + 1, year: now.getFullYear() };
-    });
-
-  ctx.log(`Detected calendar date: ${JSON.stringify(selectedDateInfo)}`);
-
-  const selectedDateMidnight: Date | null = selectedDateInfo
-    ? new Date(selectedDateInfo.year, selectedDateInfo.month - 1, selectedDateInfo.day, 0, 0, 0, 0)
-    : null;
-
-  // ── 48h Check Helper ────────────────────────────────────────────────────────────────────────────
-
-  function parseStartMinutes(text: string): number | null {
-    // AM/PM format: "05:00 PM"
-    const m12 = text.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-    if (m12) {
-      let h = parseInt(m12[1], 10);
-      const min = parseInt(m12[2], 10);
-      if (m12[3].toUpperCase() === 'AM') { if (h === 12) h = 0; }
-      else { if (h !== 12) h += 12; }
-      return h * 60 + min;
-    }
-    // 24h format: "17:00"
-    const m24 = text.match(/(\d{1,2}):(\d{2})/);
-    if (m24) {
-      const h = parseInt(m24[1], 10), min = parseInt(m24[2], 10);
-      if (h >= 0 && h <= 23 && min >= 0 && min <= 59) return h * 60 + min;
-    }
-    return null;
-  }
-
-  // Current system time in minutes since midnight (for today's date check)
+  const nowMs      = Date.now();
+  const cutoffMs   = nowMs + 48 * 60 * 60 * 1000;
+  const nowDate    = new Date(nowMs);
   const nowMinutes = nowDate.getHours() * 60 + nowDate.getMinutes();
 
-  // Is the selected calendar date today?
-  const isToday = selectedDateInfo !== null &&
-    selectedDateInfo.day   === nowDate.getDate() &&
-    selectedDateInfo.month === nowDate.getMonth() + 1 &&
-    selectedDateInfo.year  === nowDate.getFullYear();
+  ctx.log(`System time: ${nowDate.toISOString()} nowMinutes=${nowMinutes}`);
+  ctx.log(`48h cutoff : ${new Date(cutoffMs).toISOString()}`);
 
-  ctx.log(`isToday: ${isToday}, nowMinutes: ${nowMinutes}`);
+  // ── Step 1: Collect + filter slots entirely inside the browser ───────────────────────────────
+  // Passing nowMs and cutoffMs into evaluate avoids any Node↔browser string/timezone mismatch.
+  // The browser parses slot times, compares against now, and returns only valid slot texts.
 
-  function isBeyondCutoff(slotText: string): boolean {
-    const startMin = parseStartMinutes(slotText);
-    if (startMin === null) return true; // unparseable → allow
+  async function collectFilteredSlots(): Promise<string[]> {
+    return await c.page.evaluate(
+      ({ nowMs, cutoffMs }: { nowMs: number; cutoffMs: number }): string[] => {
+        const now    = new Date(nowMs);
+        const cutoff = new Date(cutoffMs);
 
-    // ── Case 1: Confirmed future date (isToday === false, date detected) ────────────────────────
-    // Only the 48h booking policy applies. Do NOT filter by current time — 10:30 AM on July 3rd
-    // is a valid slot even if it is currently 4:42 PM today.
-    if (selectedDateMidnight !== null && !isToday) {
-      const slotDt = new Date(selectedDateMidnight.getTime());
-      slotDt.setHours(Math.floor(startMin / 60), startMin % 60, 0, 0);
-      const ok = slotDt.getTime() > cutoffDate.getTime();
-      if (!ok) ctx.log(`Skip "${slotText}" — ${slotDt.toISOString()} within 48h cutoff`);
-      return ok;
-    }
+        // ── Detect selected calendar date ──────────────────────────────────────────────
+        const MONTHS: Record<string, number> = {
+          january:1, february:2, march:3, april:4, may:5, june:6,
+          july:7, august:8, september:9, october:10, november:11, december:12,
+          jan:1, feb:2, mar:3, apr:4, jun:6, jul:7, aug:8, sep:9, oct:10, nov:11, dec:12,
+        };
+        let calMonth = 0, calYear = 0;
+        for (const el of Array.from(document.querySelectorAll('*')) as HTMLElement[]) {
+          const txt = (el.textContent ?? '').trim();
+          if (txt.length >= 8 && txt.length < 30) {
+            const m = txt.match(/([A-Za-z]+)\s+(\d{4})/);
+            if (m) {
+              const mon = MONTHS[m[1].toLowerCase()];
+              const yr  = parseInt(m[2], 10);
+              if (mon && yr) { calMonth = mon; calYear = yr; break; }
+            }
+          }
+        }
 
-    // ── Case 2: Today selected, or date detection failed ────────────────────────────────────────
-    // Apply current-time filter: skip slots at or before the current system time.
-    // Example: now = 4:42 PM (nowMinutes=1002) → skip 10:30 AM (630), allow 5:00 PM (1020).
-    if (startMin <= nowMinutes) {
-      ctx.log(`Skip "${slotText}" — ${Math.floor(startMin/60)}:${String(startMin%60).padStart(2,'0')} is at or before current time ${Math.floor(nowMinutes/60)}:${String(nowMinutes%60).padStart(2,'0')}`);
-      return false;
-    }
+        let activeDay = 0;
+        // Strategy 1: aria-pressed / aria-selected
+        for (const sel of ['button[aria-pressed="true"]', 'button[aria-selected="true"]', '[role="gridcell"][aria-selected="true"]']) {
+          const el = document.querySelector(sel) as HTMLElement | null;
+          if (el) {
+            const n = parseInt((el.textContent ?? '').trim(), 10);
+            if (!isNaN(n) && n >= 1 && n <= 31) { activeDay = n; break; }
+          }
+        }
+        // Strategy 2: dark bg Tailwind class
+        if (!activeDay) {
+          for (const btn of Array.from(document.querySelectorAll('button')) as HTMLElement[]) {
+            const txt = (btn.textContent ?? '').trim();
+            const num = parseInt(txt, 10);
+            if (isNaN(num) || num < 1 || num > 31 || txt !== String(num)) continue;
+            const cls = btn.className || '';
+            if (cls.includes('bg-black') || cls.includes('bg-primary') || cls.includes('bg-blue') ||
+                cls.includes('bg-gray-900') ||
+                (cls.includes('rounded-full') && cls.includes('text-white'))) {
+              activeDay = num; break;
+            }
+          }
+        }
+        // Strategy 3: computed dark background
+        if (!activeDay) {
+          for (const btn of Array.from(document.querySelectorAll('button')) as HTMLElement[]) {
+            const txt = (btn.textContent ?? '').trim();
+            const num = parseInt(txt, 10);
+            if (isNaN(num) || num < 1 || num > 31 || txt !== String(num)) continue;
+            const bg = window.getComputedStyle(btn).backgroundColor;
+            const m = bg.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+            if (!m) continue;
+            const r = parseInt(m[1],10), g = parseInt(m[2],10), b = parseInt(m[3],10);
+            if (r < 210 || g < 210 || b < 210) { activeDay = num; break; }
+          }
+        }
 
-    return true;
+        // Build the selected date (use browser's local now if calendar detection failed)
+        const selMonth = calMonth || (now.getMonth() + 1);
+        const selYear  = calYear  || now.getFullYear();
+        const selDay   = activeDay || now.getDate();
+        const selectedMidnight = new Date(selYear, selMonth - 1, selDay, 0, 0, 0, 0);
+
+        const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+        const isToday = selectedMidnight.getTime() === todayMidnight.getTime();
+
+        // ── Parse start-time minutes from slot text ────────────────────────────────────
+        function parseStartMin(text: string): number {
+          // Normalize: collapse all whitespace-like chars, keep only printable ASCII
+          const s = text.replace(/\s/g, ' ').replace(/[^\x20-\x7E]/g, ' ').replace(/\s+/g, ' ').trim();
+          const m12 = s.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+          if (m12) {
+            let h = parseInt(m12[1], 10);
+            const min = parseInt(m12[2], 10);
+            if (m12[3].toUpperCase() === 'AM') { if (h === 12) h = 0; }
+            else { if (h !== 12) h += 12; }
+            return h * 60 + min;
+          }
+          const m24 = s.match(/(\d{1,2}):(\d{2})/);
+          if (m24) {
+            const h = parseInt(m24[1], 10), min = parseInt(m24[2], 10);
+            if (h >= 0 && h <= 23 && min >= 0 && min <= 59) return h * 60 + min;
+          }
+          return -1;
+        }
+
+        // ── Filter function ────────────────────────────────────────────────────────────
+        function isValid(slotText: string): boolean {
+          const startMin = parseStartMin(slotText);
+          if (startMin < 0) return false; // unparseable → skip
+
+          const nowMinutes = now.getHours() * 60 + now.getMinutes();
+
+          if (isToday) {
+            // Today: slot must be strictly after the current time-of-day
+            return startMin > nowMinutes;
+          }
+
+          // Future date: slot datetime must be both after now AND beyond the 48h cutoff
+          const slotDt = new Date(selectedMidnight.getTime());
+          slotDt.setHours(Math.floor(startMin / 60), startMin % 60, 0, 0);
+          return slotDt.getTime() > now.getTime() && slotDt.getTime() > cutoff.getTime();
+        }
+
+        // ── Collect slot button texts ──────────────────────────────────────────────────
+        const xp = `//button[contains(normalize-space(.),':') and string-length(normalize-space(.)) > 4 and not(contains(@class,'flex-1'))]`;
+        const result = document.evaluate(xp, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+        const slots: string[] = [];
+        for (let i = 0; i < result.snapshotLength; i++) {
+          const el = result.snapshotItem(i) as HTMLElement | null;
+          if (!el) continue;
+          const t = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+          if (t.length > 4 && !['Morning', 'Afternoon', 'Evening'].some(s => t.startsWith(s))) {
+            slots.push(t);
+          }
+        }
+
+        // Return only slots that pass the time filter, preserving order
+        return slots.filter(isValid);
+      },
+      { nowMs, cutoffMs }
+    );
   }
 
-  // ── Tab + Slot Helpers ──────────────────────────────────────────────────────────────────────────
-
-  // Click a Morning/Afternoon/Evening tab by exact label match.
-  // Uses XPath to find a button that contains the label text but is NOT a time-slot button
-  // (slot buttons always contain ":" so we exclude those).
+  // ── Step 2: Helper to click a tab ────────────────────────────────────────────────────────────
   async function clickSectionTab(label: string): Promise<boolean> {
-    // Tab buttons contain the label word but do NOT contain ":" (which all slot buttons have)
     const xp = `//button[contains(normalize-space(.),'${label}') and not(contains(normalize-space(.),':'))]`;
-    const found: boolean = await c.page.evaluate((x: string) => {
-      return document.evaluate(x, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue != null;
-    }, xp);
+    const found: boolean = await c.page.evaluate((x: string) =>
+      document.evaluate(x, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue != null
+    , xp);
     if (found) {
       await c.page.locator(`xpath=${xp}`).first().click({ force: true });
       await c.wait(1000);
@@ -193,18 +170,9 @@ export async function clickAvailableTimeSlotPatient(ctx: WalnutContext) {
     return false;
   }
 
-  // Collect all slot button texts currently visible on the page.
-  // Uses normalize-space(.) to capture text inside child <span> elements.
-  // No class filter — HHCS marks all slots disabled/cursor-not-allowed for styling.
-  async function collectVisibleSlots(): Promise<string[]> {
-    // Slot buttons: contain ":" and are reasonably long (time ranges like "05:00 PM – 05:30 PM")
-    const xp =
-      `//button[` +
-        `contains(normalize-space(.),':')` +
-        ` and string-length(normalize-space(.)) > 4` +
-        ` and not(contains(@class,'flex-1'))` +
-      `]`;
-
+  // ── Step 3: Helper to collect ALL slot texts (unfiltered) ────────────────────────────────────
+  async function collectAllSlots(): Promise<string[]> {
+    const xp = `//button[contains(normalize-space(.),':') and string-length(normalize-space(.)) > 4 and not(contains(@class,'flex-1'))]`;
     return await c.page.evaluate((xpath: string): string[] => {
       const result = document.evaluate(xpath, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
       const out: string[] = [];
@@ -212,96 +180,76 @@ export async function clickAvailableTimeSlotPatient(ctx: WalnutContext) {
         const el = result.snapshotItem(i) as HTMLElement | null;
         if (!el) continue;
         const t = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
-        // Filter out tab labels that happen to match (Morning 3, Afternoon 10, etc.)
-        if (t.length > 4 && !['Morning', 'Afternoon', 'Evening'].some(s => t.startsWith(s))) {
-          out.push(t);
-        }
+        if (t.length > 4 && !['Morning', 'Afternoon', 'Evening'].some(s => t.startsWith(s))) out.push(t);
       }
       return out;
     }, xp);
   }
 
-  // ── Phase 1: Collect slots per section ─────────────────────────────────────────────────────────
-
-  ctx.log('Phase 1: Collecting slots from Morning, Afternoon, Evening tabs...');
+  // ── Step 4: Collect slots per section ────────────────────────────────────────────────────────
+  ctx.log('Collecting slots from Morning, Afternoon, Evening...');
 
   await clickSectionTab('Morning');
-  const morningSlots = await collectVisibleSlots();
-  ctx.log(`Morning: ${morningSlots.length} slots — ${morningSlots.slice(0,3).join(', ')}`);
+  const morningSlots = await collectAllSlots();
+  ctx.log(`Morning: [${morningSlots.join(' | ')}]`);
 
   await clickSectionTab('Afternoon');
-  const afternoonSlots = await collectVisibleSlots();
-  ctx.log(`Afternoon: ${afternoonSlots.length} slots — ${afternoonSlots.slice(0,3).join(', ')}`);
+  const afternoonSlots = await collectAllSlots();
+  ctx.log(`Afternoon: [${afternoonSlots.join(' | ')}]`);
 
   await clickSectionTab('Evening');
-  const eveningSlots = await collectVisibleSlots();
-  ctx.log(`Evening: ${eveningSlots.length} slots — ${eveningSlots.slice(0,3).join(', ')}`);
+  const eveningSlots = await collectAllSlots();
+  ctx.log(`Evening: [${eveningSlots.join(' | ')}]`);
 
-  // firstSlot = first morning slot (no 48h filter)
-  const firstSlotText = morningSlots.length > 0 ? morningSlots[0] : null;
+  // firstSlot = first morning slot (no time filter — used for range boundary)
+  if (morningSlots.length > 0 && firstSlotVar) {
+    ctx.setVariable(firstSlotVar, morningSlots[0]);
+    ctx.log(`firstSlot → "${morningSlots[0]}"`);
+  }
 
-  // lastSlot = last bookable slot in Evening, fallback Afternoon
-  const eveningBookable   = eveningSlots.filter(isBeyondCutoff);
-  const afternoonBookable = afternoonSlots.filter(isBeyondCutoff);
-  const lastSlotText =
-    eveningBookable.length   > 0 ? eveningBookable[eveningBookable.length - 1] :
-    afternoonBookable.length > 0 ? afternoonBookable[afternoonBookable.length - 1] :
-    null;
+  // ── Step 5: Find first valid slot across sections (Morning → Afternoon → Evening) ────────────
+  // Switch to each tab and re-run the browser-side filter to get valid slots
+  const sections = [
+    { label: 'Morning',   slots: morningSlots },
+    { label: 'Afternoon', slots: afternoonSlots },
+    { label: 'Evening',   slots: eveningSlots },
+  ];
 
-  if (firstSlotText && firstSlotVar) {
-    ctx.setVariable(firstSlotVar, firstSlotText);
-    ctx.log(`firstSlot → "${firstSlotText}"`);
+  // lastSlot = last valid slot from Evening or Afternoon
+  let lastSlotText: string | null = null;
+  for (const { label, slots } of [...sections].reverse()) {
+    if (slots.length === 0) continue;
+    await clickSectionTab(label);
+    const valid = await collectFilteredSlots();
+    ctx.log(`${label} valid slots: [${valid.join(' | ')}]`);
+    if (valid.length > 0 && !lastSlotText) {
+      lastSlotText = valid[valid.length - 1];
+    }
   }
   if (lastSlotText && lastSlotVar) {
     ctx.setVariable(lastSlotVar, lastSlotText);
     ctx.log(`lastSlot → "${lastSlotText}"`);
   }
 
-  // ── Phase 2: Click first bookable slot (Morning → Afternoon → Evening) ─────────────────────────
+  // Find and click the first valid slot
+  for (const { label } of sections) {
+    await clickSectionTab(label);
+    const valid = await collectFilteredSlots();
+    ctx.log(`${label}: ${valid.length} valid slot(s) — [${valid.slice(0,3).join(' | ')}]`);
 
-  ctx.log('Phase 2: Clicking first bookable slot beyond 48h cutoff...');
-
-  const sectionSlots = [
-    { section: 'Morning',   slots: morningSlots },
-    { section: 'Afternoon', slots: afternoonSlots },
-    { section: 'Evening',   slots: eveningSlots },
-  ];
-
-  for (const { section, slots } of sectionSlots) {
-    if (slots.length === 0) {
-      ctx.log(`"${section}" — no slots, skipping`);
+    if (valid.length === 0) {
+      ctx.log(`"${label}" — no valid slots, trying next section`);
       continue;
     }
 
-    const bookable = slots.filter(isBeyondCutoff);
-    ctx.log(`"${section}" — ${bookable.length}/${slots.length} bookable`);
+    const slotText = valid[0];
+    ctx.log(`Clicking "${slotText}" in "${label}"...`);
 
-    if (bookable.length === 0) {
-      ctx.log(`"${section}" — all within 48h, trying next section`);
-      continue;
-    }
-
-    const slotText = bookable[0];
-
-    // Switch to this section tab before clicking the slot
-    await clickSectionTab(section);
-
-    ctx.log(`Clicking "${slotText}" in "${section}"...`);
-
-    // Build a button-scoped XPath using the FULL slot text to avoid matching the wrong slot.
-    // We use the full normalized text (e.g. "04:30 PM – 05:00 PM") so the XPath never
-    // accidentally resolves to an earlier slot that merely shares the start-time substring.
+    // Primary: exact full-text XPath match (handles en-dash and any Unicode correctly)
     const escapedFull = slotText.replace(/'/g, "\\'");
-
-    // Primary: match on the full slot text
-    const xpFull =
-      `//button[` +
-        `not(contains(@class,'flex-1'))` +
-        ` and normalize-space(.)='${escapedFull}'` +
-      `]`;
+    const xpFull = `//button[not(contains(@class,'flex-1')) and normalize-space(.)='${escapedFull}']`;
 
     let clicked = false;
-
     const foundFull: boolean = await c.page.evaluate((x: string) =>
       document.evaluate(x, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue != null
     , xpFull);
@@ -311,71 +259,96 @@ export async function clickAvailableTimeSlotPatient(ctx: WalnutContext) {
       clicked = true;
     }
 
+    // Fallback: scan visible buttons by start-time, re-filter in browser
     if (!clicked) {
-      // Fallback: match on start-time portion (e.g. "04:30 PM"), still button-scoped
-      const startMatch = slotText.match(/(\d{1,2}:\d{2}\s*(?:AM|PM))/i);
-      const startKey   = startMatch ? startMatch[1].trim() : slotText.trim();
-      ctx.log(`Full-text match failed — retrying with start key "${startKey}"`);
+      ctx.log(`Full-text XPath failed for "${slotText}" — using browser-side fallback`);
+      const safeSlot: string | null = await c.page.evaluate(
+        ({ nowMs, cutoffMs, hint }: { nowMs: number; cutoffMs: number; hint: string }): string | null => {
+          const now    = new Date(nowMs);
+          const cutoff = new Date(cutoffMs);
 
-      const xpStart =
-        `//button[` +
-          `not(contains(@class,'flex-1'))` +
-          ` and contains(normalize-space(.),'${startKey}')` +
-          ` and string-length(normalize-space(.)) > 4` +
-        `]`;
+          function parseStartMin(text: string): number {
+            const s = text.replace(/\s/g, ' ').replace(/[^\x20-\x7E]/g, ' ').replace(/\s+/g, ' ').trim();
+            const m12 = s.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+            if (m12) {
+              let h = parseInt(m12[1], 10);
+              const min = parseInt(m12[2], 10);
+              if (m12[3].toUpperCase() === 'AM') { if (h === 12) h = 0; }
+              else { if (h !== 12) h += 12; }
+              return h * 60 + min;
+            }
+            const m24 = s.match(/(\d{1,2}):(\d{2})/);
+            if (m24) {
+              const h = parseInt(m24[1], 10), mn = parseInt(m24[2], 10);
+              if (h >= 0 && h <= 23 && mn >= 0 && mn <= 59) return h * 60 + mn;
+            }
+            return -1;
+          }
 
-      // Collect all matching buttons and pick the one whose full text passes the time filter
-      const candidates: string[] = await c.page.evaluate((x: string): string[] => {
-        const result = document.evaluate(x, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-        const out: string[] = [];
-        for (let i = 0; i < result.snapshotLength; i++) {
-          const el = result.snapshotItem(i) as HTMLElement | null;
-          if (el) out.push((el.textContent ?? '').replace(/\s+/g, ' ').trim());
+          const nowMinutes = now.getHours() * 60 + now.getMinutes();
+          const hintMin = parseStartMin(hint);
+
+          const xp = `//button[contains(normalize-space(.),':') and string-length(normalize-space(.)) > 4 and not(contains(@class,'flex-1'))]`;
+          const result = document.evaluate(xp, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+          for (let i = 0; i < result.snapshotLength; i++) {
+            const el = result.snapshotItem(i) as HTMLElement | null;
+            if (!el) continue;
+            const t = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+            if (t.length <= 4 || ['Morning','Afternoon','Evening'].some(s => t.startsWith(s))) continue;
+            const sm = parseStartMin(t);
+            if (sm < 0) continue;
+            // Must match the hint slot's start time AND be after current time
+            if (sm === hintMin && sm > nowMinutes) return t;
+          }
+          // If exact match not found, return first button after current time
+          const result2 = document.evaluate(xp, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+          for (let i = 0; i < result2.snapshotLength; i++) {
+            const el = result2.snapshotItem(i) as HTMLElement | null;
+            if (!el) continue;
+            const t = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+            if (t.length <= 4 || ['Morning','Afternoon','Evening'].some(s => t.startsWith(s))) continue;
+            const sm = parseStartMin(t);
+            if (sm > nowMinutes) return t;
+          }
+          return null;
+        },
+        { nowMs, cutoffMs, hint: slotText }
+      );
+
+      if (safeSlot) {
+        const escapedSafe = safeSlot.replace(/'/g, "\\'");
+        const xpSafe = `//button[not(contains(@class,'flex-1')) and normalize-space(.)='${escapedSafe}']`;
+        const foundSafe: boolean = await c.page.evaluate((x: string) =>
+          document.evaluate(x, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue != null
+        , xpSafe);
+        if (foundSafe) {
+          await c.page.locator(`xpath=${xpSafe}`).first().click({ force: true });
+          clicked = true;
+          ctx.log(`Fallback clicked "${safeSlot}"`);
         }
-        return out;
-      }, xpStart);
-
-      // Pick the first candidate that passes the current-time filter
-      const safeCandidate = candidates.find(t => isBeyondCutoff(t));
-      if (safeCandidate) {
-        const escapedCandidate = safeCandidate.replace(/'/g, "\\'");
-        const xpCandidate =
-          `//button[` +
-            `not(contains(@class,'flex-1'))` +
-            ` and normalize-space(.)='${escapedCandidate}'` +
-          `]`;
-        await c.page.locator(`xpath=${xpCandidate}`).first().click({ force: true });
-        clicked = true;
-        ctx.log(`Fallback clicked "${safeCandidate}"`);
-      } else {
-        ctx.warn(`No valid candidate button found for start key "${startKey}"`);
       }
     }
 
     if (!clicked) {
-      throw new Error(`Could not click slot "${slotText}" in section "${section}"`);
+      throw new Error(`Could not click slot "${slotText}" in section "${label}"`);
     }
 
     await c.wait(800);
     ctx.log(`Clicked: "${slotText}"`);
-
     if (outputVar) {
       ctx.setVariable(outputVar, slotText);
       ctx.log(`selectedSlot → "${slotText}"`);
     }
-
     return;
   }
 
-  // All sections exhausted — build a useful error message
+  // All sections exhausted
+  const cutoff = new Date(cutoffMs);
   const cutoffStr =
-    `${cutoffDate.getDate()}-${String(cutoffDate.getMonth()+1).padStart(2,'0')}-${cutoffDate.getFullYear()} ` +
-    `${String(cutoffDate.getHours()).padStart(2,'0')}:${String(cutoffDate.getMinutes()).padStart(2,'0')}`;
-
+    `${cutoff.getDate()}-${String(cutoff.getMonth()+1).padStart(2,'0')}-${cutoff.getFullYear()} ` +
+    `${String(cutoff.getHours()).padStart(2,'0')}:${String(cutoff.getMinutes()).padStart(2,'0')}`;
   throw new Error(
-    `No bookable time slots found in Morning, Afternoon, or Evening. ` +
-    `All available slots are within the 48-hour booking policy window. ` +
-    `Earliest bookable datetime: ${cutoffStr}. ` +
-    `Please select a date at least 48 hours from now (${new Date().toISOString()}).`
+    `No bookable time slots found. All slots are in the past or within the 48-hour booking policy window. ` +
+    `Earliest bookable datetime: ${cutoffStr}.`
   );
 }
