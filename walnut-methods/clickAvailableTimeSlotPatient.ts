@@ -292,46 +292,67 @@ export async function clickAvailableTimeSlotPatient(ctx: WalnutContext) {
 
     ctx.log(`Clicking "${slotText}" in "${section}"...`);
 
-    // Extract start time to use as the contains() match key
-    // e.g. "05:00 PM – 05:30 PM" → "05:00 PM"
-    const startMatch = slotText.match(/(\d{1,2}:\d{2}\s*(?:AM|PM)?)/i);
-    const startKey   = startMatch ? startMatch[1].trim() : slotText.trim();
+    // Build a button-scoped XPath using the FULL slot text to avoid matching the wrong slot.
+    // We use the full normalized text (e.g. "04:30 PM – 05:00 PM") so the XPath never
+    // accidentally resolves to an earlier slot that merely shares the start-time substring.
+    const escapedFull = slotText.replace(/'/g, "\\'");
 
-    // Try Playwright getByText first (most resilient)
+    // Primary: match on the full slot text
+    const xpFull =
+      `//button[` +
+        `not(contains(@class,'flex-1'))` +
+        ` and normalize-space(.)='${escapedFull}'` +
+      `]`;
+
     let clicked = false;
-    try {
-      const loc = c.page.getByText(new RegExp(startKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
-      const cnt = await loc.count();
-      if (cnt > 0) {
-        await loc.first().click({ force: true });
-        clicked = true;
-      }
-    } catch (_) { /* fall through */ }
 
-    if (!clicked) {
-      // XPath fallback
-      const xp =
-        `//button[` +
-          `not(contains(@class,'flex-1'))` +
-          ` and contains(normalize-space(.),'${startKey}')` +
-        `]`;
-      const found: boolean = await c.page.evaluate((x: string) =>
-        document.evaluate(x, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue != null
-      , xp);
+    const foundFull: boolean = await c.page.evaluate((x: string) =>
+      document.evaluate(x, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue != null
+    , xpFull);
 
-      if (found) {
-        await c.page.locator(`xpath=${xp}`).first().click({ force: true });
-        clicked = true;
-      }
+    if (foundFull) {
+      await c.page.locator(`xpath=${xpFull}`).first().click({ force: true });
+      clicked = true;
     }
 
     if (!clicked) {
-      // Last resort: click the first slot button visible on the page
-      ctx.warn(`Could not match "${startKey}" — clicking first visible slot button`);
-      const allSlots = c.page.locator(`//button[contains(normalize-space(.),':') and string-length(normalize-space(.)) > 4 and not(contains(@class,'flex-1'))]`);
-      if (await allSlots.count() > 0) {
-        await allSlots.first().click({ force: true });
+      // Fallback: match on start-time portion (e.g. "04:30 PM"), still button-scoped
+      const startMatch = slotText.match(/(\d{1,2}:\d{2}\s*(?:AM|PM))/i);
+      const startKey   = startMatch ? startMatch[1].trim() : slotText.trim();
+      ctx.log(`Full-text match failed — retrying with start key "${startKey}"`);
+
+      const xpStart =
+        `//button[` +
+          `not(contains(@class,'flex-1'))` +
+          ` and contains(normalize-space(.),'${startKey}')` +
+          ` and string-length(normalize-space(.)) > 4` +
+        `]`;
+
+      // Collect all matching buttons and pick the one whose full text passes the time filter
+      const candidates: string[] = await c.page.evaluate((x: string): string[] => {
+        const result = document.evaluate(x, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+        const out: string[] = [];
+        for (let i = 0; i < result.snapshotLength; i++) {
+          const el = result.snapshotItem(i) as HTMLElement | null;
+          if (el) out.push((el.textContent ?? '').replace(/\s+/g, ' ').trim());
+        }
+        return out;
+      }, xpStart);
+
+      // Pick the first candidate that passes the current-time filter
+      const safeCandidate = candidates.find(t => isBeyondCutoff(t));
+      if (safeCandidate) {
+        const escapedCandidate = safeCandidate.replace(/'/g, "\\'");
+        const xpCandidate =
+          `//button[` +
+            `not(contains(@class,'flex-1'))` +
+            ` and normalize-space(.)='${escapedCandidate}'` +
+          `]`;
+        await c.page.locator(`xpath=${xpCandidate}`).first().click({ force: true });
         clicked = true;
+        ctx.log(`Fallback clicked "${safeCandidate}"`);
+      } else {
+        ctx.warn(`No valid candidate button found for start key "${startKey}"`);
       }
     }
 
