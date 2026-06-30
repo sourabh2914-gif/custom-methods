@@ -42,8 +42,26 @@ export async function clickAvailableTimeSlotPatient(ctx: WalnutContext) {
       const snap = document.evaluate(xp, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
       const out: string[] = [];
       for (let i = 0; i < snap.snapshotLength; i++) {
-        const el = snap.snapshotItem(i) as HTMLElement | null;
+        const el = snap.snapshotItem(i) as HTMLButtonElement | null;
         if (!el) continue;
+
+        // Skip disabled slots (already booked or unavailable)
+        if (el.disabled) continue;
+        if (el.getAttribute('disabled') !== null) continue;
+        if (el.getAttribute('aria-disabled') === 'true') continue;
+
+        // Skip slots styled as disabled via CSS classes (greyed out)
+        const cls = el.className || '';
+        if (cls.includes('disabled') || cls.includes('cursor-not-allowed') ||
+            cls.includes('opacity-50') || cls.includes('opacity-40') ||
+            cls.includes('line-through') || cls.includes('text-gray-3') ||
+            cls.includes('bg-gray-1') || cls.includes('bg-gray-2')) continue;
+
+        // Skip slots that look visually greyed out via computed opacity or color
+        const style = window.getComputedStyle(el);
+        const opacity = parseFloat(style.opacity);
+        if (!isNaN(opacity) && opacity < 0.6) continue;
+
         const t = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
         if (t.length > 4 && !t.startsWith('Morning') && !t.startsWith('Afternoon') && !t.startsWith('Evening')) {
           out.push(t);
