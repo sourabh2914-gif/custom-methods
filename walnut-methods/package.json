@@ -3,5 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "description": "Custom methods for Walnut test automation",
-  "dependencies": {}
+  "dependencies": {
+    "@playwright/mcp": "^0.0.77"
+  }
 }
