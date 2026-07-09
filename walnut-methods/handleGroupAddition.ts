@@ -2,7 +2,7 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Handle Group Addition
- * description: Increment support group metrics when a ${groupType} group is added using counts from $[totalGroupsCount] $[publicGroupsCount] $[privateGroupsCount]
+ * description: Capture support group counts after adding a ${groupType} group and store in $[totalGroupsCount] $[publicGroupsCount] $[privateGroupsCount]
  * actionType: custom_handle_group_addition
  * context: web
  * needsLocator: false
@@ -10,23 +10,20 @@ import type { WalnutContext } from './walnut';
  */
 export async function handleGroupAddition(ctx: WalnutContext) {
   // ctx.args layout:
-  //   args[0] — groupType            : resolved value from ${groupType} — must be "public" or "private"
+  //   args[0] — groupType            : resolved value from ${groupType} — "public" or "private"
   //   args[1] — "totalGroupsCount"   : runtime variable name (from $[totalGroupsCount])
   //   args[2] — "publicGroupsCount"  : runtime variable name (from $[publicGroupsCount])
   //   args[3] — "privateGroupsCount" : runtime variable name (from $[privateGroupsCount])
   //
   // What this method does:
-  //   1. Reads the LIVE counts from the UI metric cards (e.g. 20 / 12 / 8)
-  //   2. Stores BEFORE values into the runtime variables
-  //   3. Increments the appropriate counters based on groupType
-  //   4. Stores AFTER values back into the same runtime variables
+  //   Reads the LIVE counts directly from the UI metric cards and stores
+  //   them into the runtime variables. No arithmetic — DOM values only.
   //
   // Example:
-  //   UI shows: All=20, Public=12, Private=8
-  //   groupType = "public"
-  //   → totalGroupsCount  stored as "21"
-  //   → publicGroupsCount stored as "13"
-  //   → privateGroupsCount stored as "8"
+  //   UI shows: All=21, Public=13, Private=8  (after a public group was added)
+  //   → $[totalGroupsCount]   = "21"
+  //   → $[publicGroupsCount]  = "13"
+  //   → $[privateGroupsCount] = "8"
 
   const c = ctx as any;
 
@@ -49,16 +46,14 @@ export async function handleGroupAddition(ctx: WalnutContext) {
   if (!publicVar)  throw new Error('[handleGroupAddition] Runtime variable $[publicGroupsCount] (args[2]) is required.');
   if (!privateVar) throw new Error('[handleGroupAddition] Runtime variable $[privateGroupsCount] (args[3]) is required.');
 
-  // ── 4. DOM selectors — matches the metric card structure in the UI ──────────
-  // Targets the bold number (<p class="text-3xl font-bold text-gray-800">)
-  // that is a preceding sibling of the label paragraph in each card.
+  // ── 4. DOM selectors — bold count inside each metric card ──────────────────
   const SELECTORS = {
     total:   `//p[contains(text(),'Total no of Groups')]/preceding-sibling::p[contains(@class,'text-3xl')]`,
     public:  `//p[contains(text(),'Total Public Groups')]/preceding-sibling::p[contains(@class,'text-3xl')]`,
     private: `//p[contains(text(),'Total Private Groups')]/preceding-sibling::p[contains(@class,'text-3xl')]`,
   };
 
-  // ── 5. Helper: scrape a live integer from the DOM ───────────────────────────
+  // ── 5. Helper: read a live integer from the DOM ─────────────────────────────
   const scrapeCount = async (label: string, xpath: string): Promise<number> => {
     let raw = '';
     try {
@@ -81,44 +76,29 @@ export async function handleGroupAddition(ctx: WalnutContext) {
     const match = String(raw).match(/\d+/);
     if (!match) {
       throw new Error(
-        `[handleGroupAddition] Could not read "${label}" count from UI. ` +
+        `[handleGroupAddition] Could not read "${label}" from UI. ` +
         `XPath: "${xpath}" → got: "${raw}". ` +
-        `Ensure the metrics dashboard is visible on the page before this step runs.`
+        `Ensure the metrics dashboard is visible before this step runs.`
       );
     }
     const val = parseInt(match[0], 10);
-    c.log(`[handleGroupAddition] UI read — ${label} = ${val}`);
+    c.log(`[handleGroupAddition] DOM read — ${label} = ${val}`);
     return val;
   };
 
-  // ── 6. Read LIVE values from the UI ────────────────────────────────────────
-  const beforeTotal:   number = await scrapeCount('totalGroupsCount',   SELECTORS.total);
-  const beforePublic:  number = await scrapeCount('publicGroupsCount',  SELECTORS.public);
-  const beforePrivate: number = await scrapeCount('privateGroupsCount', SELECTORS.private);
+  // ── 6. Read LIVE values from the DOM and store directly ─────────────────────
+  const totalCount:   number = await scrapeCount('totalGroupsCount',   SELECTORS.total);
+  const publicCount:  number = await scrapeCount('publicGroupsCount',  SELECTORS.public);
+  const privateCount: number = await scrapeCount('privateGroupsCount', SELECTORS.private);
 
-  c.log(
-    `[handleGroupAddition] BEFORE — total=${beforeTotal}, ` +
-    `public=${beforePublic}, private=${beforePrivate}, groupType="${groupType}"`
-  );
+  c.setVariable(totalVar,   String(totalCount));
+  c.setVariable(publicVar,  String(publicCount));
+  c.setVariable(privateVar, String(privateCount));
 
-  // ── 7. Compute AFTER values ─────────────────────────────────────────────────
-  const afterTotal:   number = beforeTotal + 1;
-  const afterPublic:  number = groupType === 'public'  ? beforePublic  + 1 : beforePublic;
-  const afterPrivate: number = groupType === 'private' ? beforePrivate + 1 : beforePrivate;
-
-  // ── 8. Persist AFTER values into runtime variables ──────────────────────────
-  c.setVariable(totalVar,   String(afterTotal));
-  c.setVariable(publicVar,  String(afterPublic));
-  c.setVariable(privateVar, String(afterPrivate));
-
-  c.log(
-    `[handleGroupAddition] AFTER  — total=${afterTotal}, ` +
-    `public=${afterPublic}, private=${afterPrivate}`
-  );
   c.log(
     `[handleGroupAddition] Stored → ` +
-    `$[${totalVar}]=${afterTotal}, ` +
-    `$[${publicVar}]=${afterPublic}, ` +
-    `$[${privateVar}]=${afterPrivate}`
+    `$[${totalVar}]=${totalCount}, ` +
+    `$[${publicVar}]=${publicCount}, ` +
+    `$[${privateVar}]=${privateCount}`
   );
 }
