@@ -11,27 +11,46 @@ import type { WalnutContext, WalnutWebContext } from './walnut';
 export async function verifyFilteredColumn(ctx: WalnutContext) {
   const webCtx = ctx as WalnutWebContext;
 
-  // ctx.args[0] = columnSelector — CSS selector targeting all cells in the filtered column
-  // ctx.args[1] = expectedValue  — the value every cell must match (e.g. "Jimmy Tata", "Public", "Active")
+  // ctx.args[0] = columnSelector — XPath or CSS selector for all cells in the filtered column
+  // ctx.args[1] = expectedValue  — value every cell must match (e.g. "Jimmy Tata", "Public", "Active")
   const columnSelector = ctx.args[0];
   const expectedValue = ctx.args[1]?.trim().toLowerCase();
 
-  // Wait for the table rows to be present
+  // Wait for at least one matching element to appear
   await webCtx.waitForVisible(columnSelector);
 
-  // Build script using concatenation to avoid nested backtick conflict
-  const script = '(() => { const cells = document.querySelectorAll("' + columnSelector + '"); return Array.from(cells).map(el => el.textContent ? el.textContent.trim() : ""); })()';
-
-  const cellTexts: string[] = await webCtx.evaluate(script) as string[];
+  // Use page.evaluate with selector passed as argument — avoids all string injection issues
+  // Supports both XPath (starting with /) and CSS selectors
+  const cellTexts: string[] = await webCtx.page.evaluate((selector: string) => {
+    const results: string[] = [];
+    if (selector.startsWith('/') || selector.startsWith('(')) {
+      // XPath selector
+      const xpathResult = document.evaluate(
+        selector,
+        document,
+        null,
+        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+        null
+      );
+      for (let i = 0; i < xpathResult.snapshotLength; i++) {
+        const node = xpathResult.snapshotItem(i) as Element;
+        results.push(node?.textContent?.trim() || '');
+      }
+    } else {
+      // CSS selector
+      const nodes = document.querySelectorAll(selector);
+      nodes.forEach(el => results.push(el.textContent?.trim() || ''));
+    }
+    return results;
+  }, columnSelector);
 
   if (!cellTexts || cellTexts.length === 0) {
-    throw new Error('No records found for column selector "' + columnSelector + '". Filter may have returned no results.');
+    throw new Error('No records found for selector "' + columnSelector + '". Filter may have returned no results.');
   }
 
   ctx.log('Found ' + cellTexts.length + ' record(s) to verify against "' + ctx.args[1] + '"');
 
   const mismatches: string[] = [];
-
   for (const text of cellTexts) {
     if (text.trim().toLowerCase() !== expectedValue) {
       mismatches.push(text);
@@ -39,7 +58,7 @@ export async function verifyFilteredColumn(ctx: WalnutContext) {
   }
 
   if (mismatches.length > 0) {
-    throw new Error('Filter verification FAILED. Expected all values to be "' + ctx.args[1] + '" but found mismatches: [' + mismatches.join(', ') + ']');
+    throw new Error('Filter verification FAILED. Expected "' + ctx.args[1] + '" but found mismatches: [' + mismatches.join(', ') + ']');
   }
 
   ctx.log('All ' + cellTexts.length + ' record(s) match "' + ctx.args[1] + '"');
