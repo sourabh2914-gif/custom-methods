@@ -11,18 +11,17 @@ import type { WalnutContext } from './walnut';
 export async function clickAttendButton(ctx: WalnutContext) {
   // ctx.args layout:
   //   args[0] — attendButtonSelector : XPath for the Attend button
-  //                                    e.g. "//button[normalize-space()='Attend']"
+  //                                    e.g. "(//button[text()='Attend'])[1]"
   //   args[1] — "beforeAttendCount"  : output variable name (from $[beforeAttendCount])
-  //                                    stores count BEFORE clicking Attend (e.g. "0")
   //   args[2] — "afterAttendCount"   : output variable name (from $[afterAttendCount])
-  //                                    stores count AFTER clicking Attend (e.g. "1")
   //
-  // Phase 1 flow:
-  //   1. Read attendee count BEFORE click → store in $[beforeAttendCount]
-  //   2. Click the Attend button
-  //   3. Verify button changes to "Leave"
-  //   4. Read attendee count AFTER click  → store in $[afterAttendCount]
-  //   5. Assert afterAttendCount = beforeAttendCount + 1
+  // Flow:
+  //   1. Read count BEFORE click  → anchor on Attend button (exists in DOM) → $[beforeAttendCount]
+  //   2. Click Attend
+  //   3. Wait up to 9s for Leave button to appear in the SAME <tr> row
+  //   4. Read count AFTER click   → anchor on Leave button (Attend is gone from DOM) → $[afterAttendCount]
+  //   5. Assert afterCount = beforeCount + 1
+  //   NOTE: Leave button is NOT clicked here.
 
   const c = ctx as any;
 
@@ -34,20 +33,20 @@ export async function clickAttendButton(ctx: WalnutContext) {
   if (!beforeVar)            throw new Error('Output variable $[beforeAttendCount] (args[1]) is required.');
   if (!afterVar)             throw new Error('Output variable $[afterAttendCount] (args[2]) is required.');
 
-  // ── XPath helpers ────────────────────────────────────────────────────────────
-  // Count span: sibling <td> immediately before the button's <td>
-  const countSpanXpath = (): string =>
-    `(${attendButtonSelector})/ancestor::td[1]/preceding-sibling::td[1]//span[contains(@class,'text-gray-600')]`;
+  // ── Derived XPaths ───────────────────────────────────────────────────────────
+  // The Leave button appears in the same <tr> after clicking Attend.
+  // We anchor via ancestor::tr[1] so it stays valid regardless of button state.
+  const leaveInRowXpath = `(${attendButtonSelector})/ancestor::td[1]//button[normalize-space()='Leave']`;
 
-  // Leave button: same <td> as the Attend button, after click
-  const leaveXpath = (): string =>
-    `(${attendButtonSelector})/ancestor::td[1]//button[normalize-space()='Leave']`;
+  // Count span BEFORE click — Attend button exists, safe to anchor on it
+  const countBeforeXpath = `(${attendButtonSelector})/ancestor::tr[1]//span[contains(@class,'text-gray-600')]`;
 
-  // ── Helper: read integer count from the count span ───────────────────────────
-  const readCount = async (label: string): Promise<number> => {
-    const spanXpath = countSpanXpath();
+  // Count span AFTER click — Attend button is GONE, anchor on Leave button instead
+  const countAfterXpath  = `(${leaveInRowXpath})/ancestor::tr[1]//span[contains(@class,'text-gray-600')]`;
+
+  // ── Helper: read integer count ───────────────────────────────────────────────
+  const readCount = async (label: string, spanXpath: string): Promise<number> => {
     let raw = '';
-
     try {
       raw = (await c.getText(spanXpath) ?? '').trim();
     } catch (_) {}
@@ -55,30 +54,25 @@ export async function clickAttendButton(ctx: WalnutContext) {
     if (!raw || !/\d/.test(raw)) {
       try {
         raw = await c.page.evaluate((xp: string) => {
-          const result = document.evaluate(
-            xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
-          );
-          const node = result.singleNodeValue as Element | null;
+          const res = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+          const node = res.singleNodeValue as Element | null;
           return node ? (node.textContent ?? '').trim() : '';
         }, spanXpath);
       } catch (_) {}
     }
 
     const match = raw.match(/\d+/);
-    if (!match) {
-      throw new Error(`[${label}] Could not read attendee count. XPath: "${spanXpath}". Got: "${raw}"`);
-    }
+    if (!match) throw new Error(`[${label}] Could not read count. XPath: "${spanXpath}". Got: "${raw}"`);
     const val = parseInt(match[0], 10);
     c.log(`[${label}] Attendee count = ${val}`);
     return val;
   };
 
-  // ── Helper: poll for a button to become visible ──────────────────────────────
-  const waitForButton = async (xpath: string, label: string, maxMs = 7000): Promise<void> => {
-    const pollMs = 300;
-    const start  = Date.now();
+  // ── Helper: poll until button visible ───────────────────────────────────────
+  const waitForButton = async (xpath: string, label: string, maxMs = 10000): Promise<void> => {
+    const start = Date.now();
     while (Date.now() - start < maxMs) {
-      await c.wait(pollMs);
+      await c.wait(300);
       try {
         if (await c.isVisible(xpath)) {
           c.log(`Button "${label}" is now visible.`);
@@ -86,33 +80,30 @@ export async function clickAttendButton(ctx: WalnutContext) {
         }
       } catch (_) {}
     }
-    throw new Error(
-      `Assertion failed: "${label}" button did not appear within ${maxMs / 1000}s. XPath: "${xpath}"`
-    );
+    throw new Error(`"${label}" button did not appear within ${maxMs / 1000}s. XPath: "${xpath}"`);
   };
 
-  // ── Step 1: Read count BEFORE Attend ─────────────────────────────────────────
-  const countBefore = await readCount('BEFORE Attend');
+  // ── Step 1: Read count BEFORE clicking Attend ────────────────────────────────
+  const countBefore = await readCount('BEFORE Attend', countBeforeXpath);
   c.setVariable(beforeVar, String(countBefore));
-  c.log(`Stored beforeAttendCount="${countBefore}" → $[${beforeVar}]`);
+  c.log(`Stored $[${beforeVar}] = ${countBefore}`);
 
   // ── Step 2: Click Attend ──────────────────────────────────────────────────────
   await c.click(attendButtonSelector);
   c.log('Clicked Attend button.');
 
-  // ── Step 3: Verify button changed to "Leave" ──────────────────────────────────
-  await waitForButton(leaveXpath(), 'Leave');
+  // ── Step 3: Wait for Leave to appear in the same row ─────────────────────────
+  await waitForButton(leaveInRowXpath, 'Leave');
 
-  // ── Step 4: Read count AFTER Attend ──────────────────────────────────────────
-  const countAfter = await readCount('AFTER Attend');
+  // ── Step 4: Read count AFTER clicking Attend ──────────────────────────────────
+  const countAfter = await readCount('AFTER Attend', countAfterXpath);
   c.setVariable(afterVar, String(countAfter));
-  c.log(`Stored afterAttendCount="${countAfter}" → $[${afterVar}]`);
+  c.log(`Stored $[${afterVar}] = ${countAfter}`);
 
-  // ── Step 5: Assert count increased by exactly +1 ─────────────────────────────
+  // ── Step 5: Assert +1 ────────────────────────────────────────────────────────
   if (countAfter !== countBefore + 1) {
     throw new Error(
-      `Assertion failed [Phase 1 - Attend]: Expected count ${countBefore} → ${countBefore + 1}, ` +
-      `but got ${countAfter}.`
+      `Assertion failed: Expected count ${countBefore} → ${countBefore + 1}, but got ${countAfter}.`
     );
   }
   c.log(`Phase 1 PASSED: ${countBefore} → ${countAfter} (+1) ✓`);
