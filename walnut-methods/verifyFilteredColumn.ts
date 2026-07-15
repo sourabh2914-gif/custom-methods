@@ -19,21 +19,16 @@ export async function verifyFilteredColumn(ctx: WalnutContext) {
   // Wait for the table rows to be present
   await webCtx.waitForVisible(columnSelector);
 
-  // Collect text from every visible cell in the column
-  const cellTexts: string[] = await webCtx.evaluate(`
-    (() => {
-      const cells = document.querySelectorAll('${columnSelector}');
-      return Array.from(cells).map(el => el.textContent?.trim() || '');
-    })()
-  `) as string[];
+  // Build script using concatenation to avoid nested backtick conflict
+  const script = '(() => { const cells = document.querySelectorAll("' + columnSelector + '"); return Array.from(cells).map(el => el.textContent ? el.textContent.trim() : ""); })()';
+
+  const cellTexts: string[] = await webCtx.evaluate(script) as string[];
 
   if (!cellTexts || cellTexts.length === 0) {
-    throw new Error(
-      \`No records found for column selector "\${columnSelector}". Filter may have returned no results.\`
-    );
+    throw new Error('No records found for column selector "' + columnSelector + '". Filter may have returned no results.');
   }
 
-  ctx.log(\`Found \${cellTexts.length} record(s) to verify against "\${ctx.args[1]}"\`);
+  ctx.log('Found ' + cellTexts.length + ' record(s) to verify against "' + ctx.args[1] + '"');
 
   const mismatches: string[] = [];
 
@@ -44,10 +39,8 @@ export async function verifyFilteredColumn(ctx: WalnutContext) {
   }
 
   if (mismatches.length > 0) {
-    throw new Error(
-      \`Filter verification FAILED. Expected all values to be "\${ctx.args[1]}" but found mismatches: [\${mismatches.join(', ')}]\`
-    );
+    throw new Error('Filter verification FAILED. Expected all values to be "' + ctx.args[1] + '" but found mismatches: [' + mismatches.join(', ') + ']');
   }
 
-  ctx.log(\`✓ All \${cellTexts.length} record(s) match "\${ctx.args[1]}"\`);
+  ctx.log('All ' + cellTexts.length + ' record(s) match "' + ctx.args[1] + '"');
 }
