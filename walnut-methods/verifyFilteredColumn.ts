@@ -16,43 +16,26 @@ export async function verifyFilteredColumn(ctx: WalnutContext) {
   const columnSelector = ctx.args[0];
   const expectedValue = ctx.args[1]?.trim().toLowerCase();
 
-  // Wait for at least one matching element to appear
-  await webCtx.waitForVisible(columnSelector);
+  // Use page.locator — supports both XPath (//...) and CSS selectors natively
+  const locator = webCtx.page.locator(columnSelector);
 
-  // Use page.evaluate with selector passed as argument — avoids all string injection issues
-  // Supports both XPath (starting with /) and CSS selectors
-  const cellTexts: string[] = await webCtx.page.evaluate((selector: string) => {
-    const results: string[] = [];
-    if (selector.startsWith('/') || selector.startsWith('(')) {
-      // XPath selector
-      const xpathResult = document.evaluate(
-        selector,
-        document,
-        null,
-        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
-        null
-      );
-      for (let i = 0; i < xpathResult.snapshotLength; i++) {
-        const node = xpathResult.snapshotItem(i) as Element;
-        results.push(node?.textContent?.trim() || '');
-      }
-    } else {
-      // CSS selector
-      const nodes = document.querySelectorAll(selector);
-      nodes.forEach(el => results.push(el.textContent?.trim() || ''));
-    }
-    return results;
-  }, columnSelector);
+  // Wait for at least one element to be visible
+  await locator.first().waitFor({ state: 'visible', timeout: 10000 });
 
-  if (!cellTexts || cellTexts.length === 0) {
+  // Get count and collect all text values
+  const count = await locator.count();
+
+  if (count === 0) {
     throw new Error('No records found for selector "' + columnSelector + '". Filter may have returned no results.');
   }
 
-  ctx.log('Found ' + cellTexts.length + ' record(s) to verify against "' + ctx.args[1] + '"');
+  ctx.log('Found ' + count + ' record(s) to verify against "' + ctx.args[1] + '"');
 
   const mismatches: string[] = [];
-  for (const text of cellTexts) {
-    if (text.trim().toLowerCase() !== expectedValue) {
+
+  for (let i = 0; i < count; i++) {
+    const text = (await locator.nth(i).textContent() || '').trim();
+    if (text.toLowerCase() !== expectedValue) {
       mismatches.push(text);
     }
   }
@@ -61,5 +44,5 @@ export async function verifyFilteredColumn(ctx: WalnutContext) {
     throw new Error('Filter verification FAILED. Expected "' + ctx.args[1] + '" but found mismatches: [' + mismatches.join(', ') + ']');
   }
 
-  ctx.log('All ' + cellTexts.length + ' record(s) match "' + ctx.args[1] + '"');
+  ctx.log('All ' + count + ' record(s) match "' + ctx.args[1] + '"');
 }
