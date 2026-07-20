@@ -2,7 +2,7 @@ import type { WalnutContext, WalnutWebContext } from './walnut';
 
 /** @walnut_method
  * name: Verify Column Sort Order
- * description: Click sort arrow ${arrowSelector} and verify column ${columnSelector} is sorted ${sortDirection}
+ * description: Verify column ${headerSelector} is sorted ${sortDirection}
  * actionType: custom_verify_sort_order
  * context: web
  * needsLocator: false
@@ -11,42 +11,58 @@ import type { WalnutContext, WalnutWebContext } from './walnut';
 export async function verifySortOrder(ctx: WalnutContext) {
   const webCtx = ctx as WalnutWebContext;
 
-  // ctx.args[0] = arrowSelector  — XPath/CSS of the sort arrow icon to click (up or down)
-  // ctx.args[1] = columnSelector — XPath/CSS of all data cells in the column being sorted
-  // ctx.args[2] = sortDirection  — "asc" (ascending) or "desc" (descending)
-  const arrowSelector = ctx.args[0];
-  const columnSelector = ctx.args[1];
-  const sortDirection = ctx.args[2]?.trim().toLowerCase();
+  // ctx.args[0] = headerSelector — XPath/CSS of the column header (th) to derive column index
+  // ctx.args[1] = sortDirection  — "asc" (ascending) or "desc" (descending)
+  const headerSelector = ctx.args[0];
+  const sortDirection = ctx.args[1]?.trim().toLowerCase();
 
   if (sortDirection !== 'asc' && sortDirection !== 'desc') {
-    throw new Error('sortDirection must be "asc" or "desc", got: "' + ctx.args[2] + '"');
+    throw new Error('sortDirection must be "asc" or "desc", got: "' + ctx.args[1] + '"');
   }
 
-  // Step 1 — Click the sort arrow
-  ctx.log('Clicking sort arrow: ' + arrowSelector);
-  await webCtx.page.locator(arrowSelector).first().click();
+  // Step 1 — Find the column index from the header
+  const headerLocator = webCtx.page.locator(headerSelector);
+  await headerLocator.first().waitFor({ state: 'visible', timeout: 10000 });
 
-  // Step 2 — Wait for table to re-render after sort
-  await webCtx.page.waitForTimeout(1000);
+  // Get 1-based column index by evaluating position among sibling th elements
+  const colIndex: number = await webCtx.page.evaluate((sel: string) => {
+    let header: Element | null = null;
 
-  // Step 3 — Collect all visible cell values in the sorted column
-  const cellLocator = webCtx.page.locator(columnSelector);
+    // Support both XPath and CSS selectors
+    if (sel.startsWith('/') || sel.startsWith('(')) {
+      const result = document.evaluate(sel, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+      header = result.singleNodeValue as Element | null;
+    } else {
+      header = document.querySelector(sel);
+    }
+
+    if (!header) throw new Error('Header element not found for selector: ' + sel);
+
+    const siblings = Array.from(header.parentElement?.children || []);
+    return siblings.indexOf(header) + 1; // 1-based index
+  }, headerSelector);
+
+  ctx.log('Detected column index: ' + colIndex);
+
+  // Step 2 — Locate all data cells (td) in that column using nth-child
+  const cellLocator = webCtx.page.locator('tbody tr td:nth-child(' + colIndex + ')');
   await cellLocator.first().waitFor({ state: 'visible', timeout: 10000 });
 
   const count = await cellLocator.count();
   if (count === 0) {
-    throw new Error('No records found for column selector "' + columnSelector + '"');
+    throw new Error('No data rows found for column index ' + colIndex);
   }
 
-  ctx.log('Collected ' + count + ' cell(s) after sort click');
+  ctx.log('Collected ' + count + ' cell(s) from column ' + colIndex);
 
+  // Step 3 — Collect all cell text values
   const actualValues: string[] = [];
   for (let i = 0; i < count; i++) {
     const text = (await cellLocator.nth(i).textContent() || '').trim();
     actualValues.push(text);
   }
 
-  // Step 4 — Build the expected sorted order from the actual values
+  // Step 4 — Build the expected sorted order
   const sortedValues = [...actualValues].sort((a, b) => {
     const aLower = a.toLowerCase();
     const bLower = b.toLowerCase();
@@ -55,7 +71,7 @@ export async function verifySortOrder(ctx: WalnutContext) {
     return 0;
   });
 
-  // Step 5 — Compare actual order vs expected sorted order
+  // Step 5 — Compare actual vs expected order
   ctx.log('Actual order:   [' + actualValues.join(', ') + ']');
   ctx.log('Expected order: [' + sortedValues.join(', ') + ']');
 
