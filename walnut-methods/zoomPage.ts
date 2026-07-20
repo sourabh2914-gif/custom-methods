@@ -25,6 +25,10 @@ export async function zoomPage(ctx: WalnutContext) {
     zoomLevel = 0.75;
   }
 
-  await webCtx.evaluate(`document.documentElement.style.zoom = '${zoomLevel}'`);
+  await webCtx.evaluate(`
+    document.documentElement.style.zoom = '${zoomLevel}';
+    document.documentElement.style.minHeight = (${1 / zoomLevel} * 100) + 'vh';
+    document.body.style.minHeight = (${1 / zoomLevel} * 100) + 'vh';
+  `);
   ctx.log(`Zoomed ${direction} to ${zoomLevel * 100}%`);
 }
