@@ -25,6 +25,6 @@ export async function zoomPage(ctx: WalnutContext) {
     zoomLevel = 0.75;
   }
 
-  await webCtx.evaluate(`document.body.style.zoom = '${zoomLevel}'`);
+  await webCtx.evaluate(`document.documentElement.style.zoom = '${zoomLevel}'`);
   ctx.log(`Zoomed ${direction} to ${zoomLevel * 100}%`);
 }
