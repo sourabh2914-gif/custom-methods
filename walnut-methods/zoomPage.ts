@@ -25,6 +25,10 @@ export async function zoomPage(ctx: WalnutContext) {
     zoomLevel = 0.75;
   }
 
-  await webCtx.evaluate(`document.body.style.zoom = '${zoomLevel}'`);
-  ctx.log(`Zoomed ${direction} to ${zoomLevel * 100}%`);
+  // Get current viewport size, then scale it inversely so content fills the screen
+  const currentSize = webCtx.page.viewportSize() ?? { width: 1280, height: 720 };
+  const newWidth = Math.round(currentSize.width / zoomLevel);
+  const newHeight = Math.round(currentSize.height / zoomLevel);
+  await webCtx.page.setViewportSize({ width: newWidth, height: newHeight });
+  ctx.log(`Zoomed ${direction} to ${zoomLevel * 100}% (viewport: ${newWidth}x${newHeight})`);
 }
