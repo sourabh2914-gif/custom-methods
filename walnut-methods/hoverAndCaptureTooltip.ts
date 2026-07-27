@@ -9,49 +9,73 @@ import type { WalnutContext } from './walnut';
  * category: Query
  */
 export async function hoverAndCaptureTooltip(ctx: WalnutContext) {
-  // ctx.args[0] = value of ${selector}      — CSS/XPath selector of the element to hover on (e.g. chart bar)
-  // ctx.args[1] = "tooltipValue" (from $[tooltipValue]) — runtime variable name to store the captured text
+  // ctx.args[0] = value of ${selector}     — CSS or XPath selector of the element to hover (e.g. a chart bar)
+  //                                           c.hover() is Playwright-native and handles both CSS and XPath.
+  // ctx.args[1] = "tooltipValue" (from $[tooltipValue]) — runtime variable name to store captured text
 
-  const selector      = String(ctx.args[0]);
-  const outputVar     = String(ctx.args[1]);
-  const c             = ctx as any;
+  const selector  = String(ctx.args[0]);
+  const outputVar = String(ctx.args[1]);
+  const c         = ctx as any;
 
   ctx.log(`[HoverAndCaptureTooltip] Hovering on: "${selector}"`);
 
-  // 1. Scroll element into view and move the mouse over it
-  await ctx.hover(selector);
+  // 1. Playwright hover — supports both CSS selectors and XPath expressions natively
+  await c.hover(selector);
 
-  // 2. Hold the cursor in place for 3.5 s — enough for chart tooltips to fully render
-  await ctx.wait(3500);
+  // 2. Hold cursor in place for 3.5 s — enough for chart tooltip to fully render
+  await c.wait(3500);
 
-  // 3. Attempt to read the tooltip text using a multi-strategy DOM scan.
-  //    Tooltip libraries vary widely — we try common patterns in priority order:
-  //      a) role="tooltip"
-  //      b) [class*="tooltip"] / [class*="Tooltip"]
-  //      c) [data-testid*="tooltip"] / [data-tip] / title attribute on hovered element
-  //      d) Recharts / Victory / Chart.js floating <div> overlays
-  //      e) Aria-described-by target of the hovered element
+  // 3. Scan the DOM for tooltip text using multiple strategies.
+  //    NOTE: page.evaluate runs inside the browser — document.querySelector only accepts CSS.
+  //    We pass the selector as a string so Strategy C can use the correct browser API
+  //    (XPath via document.evaluate, or CSS via document.querySelector).
   const tooltipText: string = await c.page.evaluate((sel: string) => {
-    // ── Helper: pick the most specific non-empty text from an element ────────
+
+    // ── Helper: extract trimmed text from an element ─────────────────────────
     function extractText(el: Element | null): string {
       if (!el) return '';
       return (el.textContent ?? '').replace(/\s+/g, ' ').trim();
     }
 
-    // ── Helper: is the element currently visible (has size & not hidden)? ────
+    // ── Helper: check element is visually rendered ───────────────────────────
     function isVisible(el: Element): boolean {
       const r = (el as HTMLElement).getBoundingClientRect();
       if (r.width === 0 && r.height === 0) return false;
       const style = window.getComputedStyle(el as HTMLElement);
-      return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+      return style.display !== 'none'
+          && style.visibility !== 'hidden'
+          && style.opacity !== '0';
     }
 
-    // ── Strategy A: role="tooltip" ───────────────────────────────────────────
+    // ── Helper: resolve a CSS or XPath selector to an Element (browser-safe) ─
+    // document.querySelector() only accepts CSS — XPath strings starting with
+    // "//" or "(" must use document.evaluate() instead.
+    function resolveSelector(s: string): Element | null {
+      const isXPath = s.trimStart().startsWith('//') || s.trimStart().startsWith('(');
+      if (isXPath) {
+        try {
+          const result = document.evaluate(
+            s, document, null,
+            XPathResult.FIRST_ORDERED_NODE_TYPE, null
+          );
+          return (result.singleNodeValue as Element | null) ?? null;
+        } catch (_) {
+          return null;
+        }
+      }
+      try {
+        return document.querySelector(s);
+      } catch (_) {
+        return null;
+      }
+    }
+
+    // ── Strategy A: role="tooltip" (most reliable across libraries) ──────────
     const roleTooltips = Array.from(document.querySelectorAll('[role="tooltip"]'))
       .filter(isVisible);
     if (roleTooltips.length > 0) return extractText(roleTooltips[0]);
 
-    // ── Strategy B: common tooltip class names ───────────────────────────────
+    // ── Strategy B: common tooltip/chart class names ─────────────────────────
     const classSelectors = [
       '[class*="tooltip"]',
       '[class*="Tooltip"]',
@@ -68,32 +92,32 @@ export async function hoverAndCaptureTooltip(ctx: WalnutContext) {
       if (els.length > 0) return extractText(els[0]);
     }
 
-    // ── Strategy C: aria-describedby on the hovered element ─────────────────
-    const hovered = document.querySelector(sel);
+    // ── Strategy C: attributes on the hovered element itself ─────────────────
+    // Uses resolveSelector() so XPath strings are handled via document.evaluate
+    // instead of the CSS-only document.querySelector — this was the crash source.
+    const hovered = resolveSelector(sel);
     if (hovered) {
       const describedById = hovered.getAttribute('aria-describedby');
       if (describedById) {
         const desc = document.getElementById(describedById);
         if (desc && isVisible(desc)) return extractText(desc);
       }
-
-      // data-tip attribute (tippy.js, etc.)
+      // data-tip (tippy.js) or plain title attribute
       const dataTip = hovered.getAttribute('data-tip') ?? hovered.getAttribute('title');
       if (dataTip) return dataTip.trim();
     }
 
-    // ── Strategy D: any newly visible floating div with position:absolute/fixed
-    //    that contains numeric content (common for chart tooltip overlays) ────
+    // ── Strategy D: visible floating div/span containing a number ────────────
+    // Fallback for custom chart overlays (position: absolute/fixed, has digits)
     const floaters = Array.from(document.querySelectorAll('div, span, ul'))
       .filter((el) => {
         if (!isVisible(el)) return false;
         const pos = window.getComputedStyle(el as HTMLElement).position;
         if (pos !== 'absolute' && pos !== 'fixed') return false;
         const text = (el.textContent ?? '').trim();
-        // Must have at least one digit (tooltip values are numeric or contain numbers)
         return /\d/.test(text) && text.length < 300;
       })
-      // prefer smaller, more specific containers
+      // prefer the smallest/most-specific container
       .sort((a, b) => (a.textContent?.length ?? 0) - (b.textContent?.length ?? 0));
 
     if (floaters.length > 0) return extractText(floaters[0]);
@@ -104,7 +128,7 @@ export async function hoverAndCaptureTooltip(ctx: WalnutContext) {
   if (tooltipText) {
     ctx.log(`[HoverAndCaptureTooltip] Captured tooltip: "${tooltipText}"`);
   } else {
-    ctx.log('[HoverAndCaptureTooltip] No tooltip text found after hover — storing empty string');
+    ctx.log('[HoverAndCaptureTooltip] No tooltip text found — storing empty string');
   }
 
   ctx.setVariable(outputVar, tooltipText);
