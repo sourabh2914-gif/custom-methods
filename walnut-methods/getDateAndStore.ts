@@ -78,15 +78,22 @@ export async function getDateAndStore(ctx: WalnutContext) {
   const mmm  = monthNamesShort[date.getMonth()];
   const mmmm = monthNamesFull[date.getMonth()];
 
-  // Apply format — longest tokens first to avoid partial matches
+  // Apply format — single-pass regex replacement to avoid cascade/overlap issues.
+  // Alternation order ensures longer tokens (YYYY, MMMM, MMM) are always tried
+  // before their shorter overlapping counterparts (YY, MM).
   function applyFormat(padded: boolean): string {
-    return format.toUpperCase()
-      .replace('YYYY', yyyy)
-      .replace('YY',   yy)
-      .replace('MMMM', mmmm)
-      .replace('MMM',  mmm)
-      .replace('MM',   padded ? mm : m)
-      .replace('DD',   padded ? dd : d);
+    const tokenMap: Record<string, string> = {
+      'YYYY': yyyy,
+      'YY':   yy,
+      'MMMM': mmmm,
+      'MMM':  mmm,
+      'MM':   padded ? mm : m,
+      'DD':   padded ? dd : d,
+    };
+    return format.toUpperCase().replace(
+      /YYYY|YY|MMMM|MMM|MM|DD/g,
+      (token) => tokenMap[token] ?? token
+    );
   }
 
   const paddedFormatted   = applyFormat(true);   // e.g. "09-06-2026"
