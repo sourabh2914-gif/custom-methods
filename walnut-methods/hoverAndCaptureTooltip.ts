@@ -70,7 +70,45 @@ export async function hoverAndCaptureTooltip(ctx: WalnutContext) {
       }
     }
 
-    // ── Strategy A: role="tooltip" (most reliable across libraries) ──────────
+    // ── Strategy A: SVG <title> on the hovered element (e.g. chart bars) ─────
+    // Charts like this one embed tooltip text as a <title> child inside the
+    // hovered <rect>/<path>/<circle>. This must be checked FIRST because the
+    // <title> is never "visible" in the CSS sense, so visibility-based checks
+    // would skip it. Example DOM:
+    //   <rect class="hover:opacity-80 ...">
+    //     <title>Systolic (patient): 210 mmHg</title>
+    //   </rect>
+    const hoveredEl = resolveSelector(sel);
+    if (hoveredEl) {
+      // Direct <title> child
+      const svgTitle = hoveredEl.querySelector('title');
+      if (svgTitle) {
+        const titleText = (svgTitle.textContent ?? '').trim();
+        if (titleText) return titleText;
+      }
+      // Also check every element that matches the selector (multi-match XPath)
+    }
+    // Broader fallback: XPath may match multiple nodes — scan all of them for a <title>
+    // Only do this when the selector is XPath (starts with "//" or "(")
+    if (sel.trimStart().startsWith('//') || sel.trimStart().startsWith('(')) {
+      try {
+        const xpathResult = document.evaluate(
+          sel, document, null,
+          XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null
+        );
+        for (let i = 0; i < xpathResult.snapshotLength; i++) {
+          const node = xpathResult.snapshotItem(i) as Element | null;
+          if (!node) continue;
+          const t = node.querySelector('title');
+          if (t) {
+            const text = (t.textContent ?? '').trim();
+            if (text) return text;
+          }
+        }
+      } catch (_) { /* ignore XPath errors */ }
+    }
+
+    // ── Strategy B: role="tooltip" (most reliable across libraries) ──────────
     const roleTooltips = Array.from(document.querySelectorAll('[role="tooltip"]'))
       .filter(isVisible);
     if (roleTooltips.length > 0) return extractText(roleTooltips[0]);
