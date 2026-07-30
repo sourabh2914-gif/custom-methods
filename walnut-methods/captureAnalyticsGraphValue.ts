@@ -79,24 +79,27 @@ export async function captureAnalyticsGraphValue(ctx: WalnutContext) {
   let responseBody: any = null;
 
   try {
-    const response = await c.page.waitForResponse(
-      async (resp: any) => {
-        try {
-          // URL must contain the analytics pattern
-          if (!resp.url().toLowerCase().includes(urlPattern.toLowerCase())) return false;
-          // Only consider successful HTTP responses
-          if (resp.status() < 200 || resp.status() >= 300) return false;
-          // Body must be valid JSON containing "series"
-          const text: string = await resp.text();
-          if (!text || !text.includes('"series"')) return false;
-          const parsed = JSON.parse(text);
-          return Array.isArray(parsed?.series);
-        } catch {
-          return false;
-        }
-      },
-      { timeout: timeoutMs }
-    );
+    // Start the response listener FIRST, then reload the page in parallel.
+    // This guarantees we never miss the API response regardless of whether
+    // the page was already loaded before this step ran.
+    const [response] = await Promise.all([
+      c.page.waitForResponse(
+        async (resp: any) => {
+          try {
+            if (!resp.url().toLowerCase().includes(urlPattern.toLowerCase())) return false;
+            if (resp.status() < 200 || resp.status() >= 300) return false;
+            const text: string = await resp.text();
+            if (!text || !text.includes('"series"')) return false;
+            const parsed = JSON.parse(text);
+            return Array.isArray(parsed?.series);
+          } catch {
+            return false;
+          }
+        },
+        { timeout: timeoutMs }
+      ),
+      c.page.reload({ waitUntil: 'domcontentloaded' }),
+    ]);
 
     const rawText: string = await response.text();
     responseBody = JSON.parse(rawText);
@@ -104,8 +107,9 @@ export async function captureAnalyticsGraphValue(ctx: WalnutContext) {
   } catch (err: any) {
     throw new Error(
       `[CaptureAnalyticsGraphValue] Analytics API response not received within ${timeoutMs}ms. ` +
-      `Ensure the URL pattern "${urlPattern}" matches the Analytics endpoint and that the ` +
-      `graph has been triggered before or during this step. Original error: ${err?.message ?? err}`
+      `URL pattern used: "${urlPattern}". Check the browser Network tab to confirm the exact ` +
+      `analytics endpoint URL and set ctx.params.analyticsApiUrlPattern if needed. ` +
+      `Original error: ${err?.message ?? err}`
     );
   }
 
