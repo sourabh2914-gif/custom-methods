@@ -2,7 +2,7 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Capture Analytics Graph Value
- * description: Capture Analytics graph value for subVital ${subVitalName} recordedBy ${recordedByType} on date ${targetDate} and store in $[graphValue]
+ * description: Capture Analytics graph value for subVital ${subVitalName} recordedBy ${recordedByType} and store in $[graphValue]
  * actionType: custom_capture_analytics_graph_value
  * context: web
  * needsLocator: false
@@ -12,8 +12,9 @@ export async function captureAnalyticsGraphValue(ctx: WalnutContext) {
   // ctx.args layout (resolved from description placeholders, in order):
   //   args[0] = value of ${subVitalName}  — e.g. "Flexor"
   //   args[1] = value of ${recordedByType} — e.g. "doctor"
-  //   args[2] = value of ${targetDate}    — e.g. "Jul 29"
-  //   args[3] = "graphValue" (from $[graphValue]) — runtime variable name to store the result
+  //   args[2] = "graphValue" (from $[graphValue]) — runtime variable name to store the result
+  //
+  // targetDate is auto-generated as today's date at runtime (no user input needed).
   //
   // Optional test-data params (from ctx.params):
   //   ctx.params.analyticsApiUrlPattern — URL substring to match the Analytics API (default: "analytics")
@@ -33,18 +34,35 @@ export async function captureAnalyticsGraphValue(ctx: WalnutContext) {
   // ── 1. Resolve inputs ──────────────────────────────────────────────────────
   const subVitalName    = String(c.args[0] ?? '').trim();
   const recordedByType  = String(c.args[1] ?? '').trim();
-  const targetDate      = String(c.args[2] ?? '').trim();
-  const outputVar       = String(c.args[3] ?? '').trim();
+  const outputVar       = String(c.args[2] ?? '').trim();
 
   if (!subVitalName)   throw new Error('[CaptureAnalyticsGraphValue] subVitalName (args[0]) is required.');
   if (!recordedByType) throw new Error('[CaptureAnalyticsGraphValue] recordedByType (args[1]) is required.');
-  if (!targetDate)     throw new Error('[CaptureAnalyticsGraphValue] targetDate (args[2]) is required.');
-  if (!outputVar)      throw new Error('[CaptureAnalyticsGraphValue] graphValue variable name (args[3]) is required.');
+  if (!outputVar)      throw new Error('[CaptureAnalyticsGraphValue] graphValue variable name (args[2]) is required.');
+
+  // Auto-generate today's date in multiple formats to match whatever label the API uses.
+  // Candidates tried in order: "Jul 30", "Jul 30 2026", "2026-07-30", "07/30/2026"
+  const _now = new Date();
+  const _monthShort = _now.toLocaleString('en-US', { month: 'short' }); // "Jul"
+  const _day        = _now.getDate();                                    // 30
+  const _year       = _now.getFullYear();                                // 2026
+  const _mm         = String(_now.getMonth() + 1).padStart(2, '0');
+  const _dd         = String(_day).padStart(2, '0');
+  const todayFormats: string[] = [
+    `${_monthShort} ${_day}`,                          // "Jul 30"
+    `${_monthShort} ${_dd}`,                           // "Jul 30" (zero-padded)
+    `${_monthShort} ${_day}, ${_year}`,                // "Jul 30, 2026"
+    `${_monthShort} ${_dd} ${_year}`,                  // "Jul 30 2026"
+    `${_year}-${_mm}-${_dd}`,                          // "2026-07-30"
+    `${_mm}/${_dd}/${_year}`,                          // "07/30/2026"
+    `${_dd}/${_mm}/${_year}`,                          // "30/07/2026"
+  ];
+  ctx.log(`[CaptureAnalyticsGraphValue] Today's date candidates: [${todayFormats.join(', ')}]`);
 
   const urlPattern: string  = String(c.params?.analyticsApiUrlPattern ?? 'analytics').trim();
   const timeoutMs: number   = Number(c.params?.analyticsApiTimeout ?? 15000);
 
-  ctx.log(`[CaptureAnalyticsGraphValue] Inputs — subVitalName: "${subVitalName}", recordedByType: "${recordedByType}", targetDate: "${targetDate}", outputVar: "${outputVar}"`);
+  ctx.log(`[CaptureAnalyticsGraphValue] Inputs — subVitalName: "${subVitalName}", recordedByType: "${recordedByType}", outputVar: "${outputVar}"`);
   ctx.log(`[CaptureAnalyticsGraphValue] Waiting for Analytics API response matching URL pattern: "${urlPattern}" (timeout: ${timeoutMs}ms)`);
 
   // ── 2. Wait for the Analytics API response ─────────────────────────────────
@@ -171,19 +189,27 @@ export async function captureAnalyticsGraphValue(ctx: WalnutContext) {
 
   ctx.log(`[CaptureAnalyticsGraphValue] Date array found under key "${usedKey}": [${dateArray.join(', ')}]`);
 
-  // Find the index of targetDate (case-insensitive, trimmed)
-  const dateIndex = dateArray.findIndex(
-    (d) => d.toLowerCase() === targetDate.toLowerCase()
-  );
+  // Find today's date by trying each format candidate against the date array.
+  let dateIndex = -1;
+  let matchedFormat = '';
+  for (const fmt of todayFormats) {
+    const idx = dateArray.findIndex((d) => d.toLowerCase() === fmt.toLowerCase());
+    if (idx !== -1) {
+      dateIndex = idx;
+      matchedFormat = fmt;
+      break;
+    }
+  }
 
   if (dateIndex === -1) {
     throw new Error(
-      `[CaptureAnalyticsGraphValue] targetDate "${targetDate}" not found in the ${usedKey} array. ` +
-      `Available dates: [${dateArray.join(', ')}]`
+      `[CaptureAnalyticsGraphValue] Today's date not found in the ${usedKey} array. ` +
+      `Tried formats: [${todayFormats.join(', ')}]. ` +
+      `Available dates in response: [${dateArray.join(', ')}]`
     );
   }
 
-  ctx.log(`[CaptureAnalyticsGraphValue] targetDate "${targetDate}" found at index ${dateIndex}`);
+  ctx.log(`[CaptureAnalyticsGraphValue] Today's date matched as "${matchedFormat}" at index ${dateIndex}`);
 
   // ── 6. Extract the data value ──────────────────────────────────────────────
   const dataArray: any[] = matchedSeries.data;
@@ -209,7 +235,7 @@ export async function captureAnalyticsGraphValue(ctx: WalnutContext) {
   if (rawValue === null || rawValue === undefined) {
     ctx.warn(
       `[CaptureAnalyticsGraphValue] data[${dateIndex}] is ${rawValue === null ? 'null' : 'undefined'} ` +
-      `for subVitalName="${subVitalName}", recordedByType="${recordedByType}", targetDate="${targetDate}". ` +
+      `for subVitalName="${subVitalName}", recordedByType="${recordedByType}", targetDate="${matchedFormat}" (today). ` +
       `Storing null in runtime variable $[${outputVar}].`
     );
     ctx.setVariable(outputVar, null);
