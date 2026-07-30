@@ -59,59 +59,76 @@ export async function captureAnalyticsGraphValue(ctx: WalnutContext) {
   ];
   ctx.log(`[CaptureAnalyticsGraphValue] Today's date candidates: [${todayFormats.join(', ')}]`);
 
-  const urlPattern: string  = String(c.params?.analyticsApiUrlPattern ?? 'analytics').trim();
-  const timeoutMs: number   = Number(c.params?.analyticsApiTimeout ?? 15000);
+  const timeoutMs: number = Number(c.params?.analyticsApiTimeout ?? 15000);
 
   ctx.log(`[CaptureAnalyticsGraphValue] Inputs — subVitalName: "${subVitalName}", recordedByType: "${recordedByType}", outputVar: "${outputVar}"`);
-  ctx.log(`[CaptureAnalyticsGraphValue] Waiting for Analytics API response matching URL pattern: "${urlPattern}" (timeout: ${timeoutMs}ms)`);
+  ctx.log(`[CaptureAnalyticsGraphValue] Reloading page and waiting for a JSON response with "series" array (timeout: ${timeoutMs}ms)`);
 
   // ── 2. Wait for the Analytics API response ─────────────────────────────────
-  // page.waitForResponse() resolves with the FIRST matching response that arrives
-  // within the timeout window.  We match on:
-  //   (a) URL contains the configured pattern (case-insensitive)
-  //   (b) Response body is non-empty JSON containing a "series" array
-  //
-  // IMPORTANT: call this BEFORE the UI action that triggers the network request.
-  // If the request has already been sent (e.g. the page auto-loaded), Playwright
-  // still resolves against responses buffered since the last navigation — so the
-  // method works both when placed before AND immediately after the triggering UI step.
+  // Use page.on('response') to collect ALL responses during the reload.
+  // waitForResponse with an async body-reading predicate is unreliable because
+  // Playwright may already have consumed the body stream before the predicate runs.
+  // Instead: attach a listener, reload, then inspect collected bodies.
 
   let responseBody: any = null;
 
-  try {
-    // Start the response listener FIRST, then reload the page in parallel.
-    // This guarantees we never miss the API response regardless of whether
-    // the page was already loaded before this step ran.
-    const [response] = await Promise.all([
-      c.page.waitForResponse(
-        async (resp: any) => {
-          try {
-            if (!resp.url().toLowerCase().includes(urlPattern.toLowerCase())) return false;
-            if (resp.status() < 200 || resp.status() >= 300) return false;
-            const text: string = await resp.text();
-            if (!text || !text.includes('"series"')) return false;
-            const parsed = JSON.parse(text);
-            return Array.isArray(parsed?.series);
-          } catch {
-            return false;
-          }
-        },
-        { timeout: timeoutMs }
-      ),
-      c.page.reload({ waitUntil: 'domcontentloaded' }),
-    ]);
+  await new Promise<void>((resolve, reject) => {
+    const collected: Array<{ url: string; body: any }> = [];
+    let settled = false;
 
-    const rawText: string = await response.text();
-    responseBody = JSON.parse(rawText);
-    ctx.log(`[CaptureAnalyticsGraphValue] Analytics API response received from: ${response.url()}`);
-  } catch (err: any) {
-    throw new Error(
-      `[CaptureAnalyticsGraphValue] Analytics API response not received within ${timeoutMs}ms. ` +
-      `URL pattern used: "${urlPattern}". Check the browser Network tab to confirm the exact ` +
-      `analytics endpoint URL and set ctx.params.analyticsApiUrlPattern if needed. ` +
-      `Original error: ${err?.message ?? err}`
-    );
-  }
+    const timeoutHandle = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      c.page.off('response', onResponse);
+      if (collected.length === 0) {
+        reject(new Error(
+          `[CaptureAnalyticsGraphValue] No JSON responses were captured within ${timeoutMs}ms after page reload. ` +
+          `Ensure the Analytics graph page is open before this step runs.`
+        ));
+      } else {
+        reject(new Error(
+          `[CaptureAnalyticsGraphValue] ${collected.length} JSON response(s) were captured but none contained a "series" array. ` +
+          `URLs seen: [${collected.map(r => r.url).join(', ')}]`
+        ));
+      }
+    }, timeoutMs);
+
+    const onResponse = async (resp: any) => {
+      try {
+        if (resp.status() < 200 || resp.status() >= 300) return;
+        const ct: string = resp.headers()['content-type'] ?? '';
+        if (!ct.includes('json')) return;
+        const text: string = await resp.text();
+        if (!text || !text.includes('"series"')) return;
+        const parsed = JSON.parse(text);
+        if (!Array.isArray(parsed?.series) || parsed.series.length === 0) {
+          collected.push({ url: resp.url(), body: parsed });
+          return;
+        }
+        // Found it — clean up and resolve
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutHandle);
+        c.page.off('response', onResponse);
+        responseBody = parsed;
+        ctx.log(`[CaptureAnalyticsGraphValue] Analytics API response captured from: ${resp.url()}`);
+        resolve();
+      } catch {
+        // Ignore parse errors on individual responses
+      }
+    };
+
+    c.page.on('response', onResponse);
+    // Reload AFTER the listener is attached
+    c.page.reload({ waitUntil: 'domcontentloaded' }).catch((err: any) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timeoutHandle);
+        c.page.off('response', onResponse);
+        reject(new Error(`[CaptureAnalyticsGraphValue] Page reload failed: ${err?.message ?? err}`));
+      }
+    });
+  });
 
   // ── 3. Validate top-level structure ───────────────────────────────────────
   if (!responseBody || typeof responseBody !== 'object') {
