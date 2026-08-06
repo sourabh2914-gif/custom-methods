@@ -13,30 +13,28 @@
 
 # Project Overview
 
-HHCS appears to be a healthcare and community scheduling platform, documented here through a single connected repository: `custom-methods`. No description was provided at the project level, so all inferences are drawn from the repository contents alone.
+HHCS appears to be a test automation support project consisting of a single TypeScript library, `custom-methods`, that provides reusable step implementations for end-to-end testing of a web application. Based on function names in the source, the target application is likely a healthcare or community scheduling platform. No backend service, frontend application, or standalone executable is present in this project — only the automation helper library.
 
-The sole repo in this aggregation is `custom-methods`, a TypeScript library of 63 browser automation helper functions. It is not a backend service, frontend application, or CLI — it is a shared test-step library consumed by an external test orchestration framework (likely Walnut, based on the `WalnutContext` type and `walnut-methods/` directory). The library's only runtime dependency is `@playwright/mcp`, placing it in a Playwright-based or MCP-compatible automation environment.
+The sole repo, `custom-methods`, contains 66 TypeScript source files organized under the `walnut-methods/` directory. Each file exports one or two async functions that accept a `WalnutContext` parameter, indicating the library is consumed by the Walnut test automation platform. The library is compiled as CommonJS and depends on `@playwright/mcp`, tying it to a Playwright-based browser automation or Model Context Protocol environment.
 
-The primary tech stack is TypeScript (CommonJS), with no detected application frameworks, no API endpoints, and no database layer. There are no detected external service integrations within this repo. Because only one repo is connected to this project, the full system architecture — including any application backend, frontend, or infrastructure — is not yet visible in this aggregation.
+Because only one repo is connected to this project and no external integrations are detected, the full system context (the actual web application under test, any CI pipeline, or additional test infrastructure) is not represented here. This documentation will need to be updated as more repos are added.
 
 ## System Architecture
 
 # System Architecture
 
-This is currently a single-repo project — update once more repos are connected and complete.
+This is a single-repo project — update once more repos are complete.
 
-- **`custom-methods`** — role: shared test-step library. Contains 63 TypeScript async functions, each accepting a `WalnutContext` parameter, organized under `walnut-methods/`. The library is packaged as CommonJS and exports all modules via an `index.js` entry point. It has no HTTP surface, no database, and no internal service-to-service communication. It is designed to be called by an external Walnut-based test orchestration engine, which passes a shared context object to each named step at runtime. The dependency on `@playwright/mcp` indicates the context object wraps a Playwright browser session or an MCP-compatible automation interface.
-
-No other repos are currently connected. The application under test — which appears to be a healthcare scheduling and community web application — is not represented in this aggregation. Inter-repo connections (e.g., how this library is imported by a test runner, or which application URLs it targets) cannot be confirmed from the available evidence.
+- **custom-methods** (role: shared library / test step library): A TypeScript CommonJS library of 66 async helper functions, each accepting a `WalnutContext` handle supplied by the Walnut test automation platform. It has no HTTP endpoints, no database, and no framework. It is not run standalone; instead, an external test runner or orchestration layer imports individual named methods to compose test scenarios. The sole declared runtime dependency is `@playwright/mcp`, placing it within a Playwright-based browser automation environment. There are no other repos in this project to connect to at this time.
 
 ## Domain
 
 # Domain
 Inferred from code only — may be inaccurate for early-stage or generic projects.
 
-Based on function names in the `custom-methods` library, the target application under test appears to be a healthcare scheduling platform with a community engagement layer. The scheduling domain is evidenced by helpers such as `clickAppointmentBySlot`, `verifyAppointmentInDayView`, `verifyAppointmentInWeekView`, `navigateToBookedDateInMonthView`, and `clickAvailableTimeSlotPatient`, which suggest a calendar-driven appointment booking workflow for patients. Authentication via one-time passwords is covered by `enterOtpFields` and `readOtpFromText`.
+The `custom-methods` library provides reusable browser interaction and assertion helpers for automated end-to-end testing of what appears to be a healthcare or scheduling web application. Function names such as `clickAppointmentBySlot`, `verifyAppointmentInDayView`, `verifyAppointmentInWeekView`, `navigateToBookedDateInMonthView`, `clickAttendButton`, `clickLeaveButton`, and `captureDobFromUi` (date of birth) indicate the target application manages appointments, patient records, and calendar-based scheduling across day, week, and month views.
 
-The community or social layer is evidenced by helpers for comments (`addDeleteCommentAndVerifyCount`), reactions (`clickLikeDislikeAndVerifyCount`), sharing (`shareAndVerifyCount`), group management (`handleGroupAddition`, `handleGroupDeactivation`), and event attendance (`captureAndIncrementEventCount`, `clickAttendAndStoreCount`). This suggests the platform combines clinical scheduling workflows with social or community features — possibly a patient portal or health community product. The library itself does not implement any of this business logic; it only provides reusable end-to-end test steps that exercise the target application through a browser.
+The target application also appears to include social or community features. Methods such as `handleGroupAddition`, `handleGroupDeactivation`, `addDeleteCommentAndVerifyCount`, `clickLikeDislikeAndVerifyCount`, and `shareAndVerifyCount` suggest functionality around groups, comments, likes, and content sharing. The primary consumers of this library are QA or automation engineers who use the Walnut platform to write test scenarios, composing these low-level step methods — such as reading an OTP, selecting a calendar date, capturing analytics values, or verifying table sort order — into higher-level test flows.
 
 ## Metadata
 
@@ -44,12 +42,12 @@ The community or social layer is evidenced by helpers for comments (`addDeleteCo
 {
   "project_id": "69cd2134b17f9683e2d30fc0",
   "project_name": "HHCS",
-  "generated_at": "2026-07-21T09:28:12Z",
+  "generated_at": "2026-08-03T05:56:03Z",
   "llm_model": "claude-sonnet-4-6",
   "total_repos": 1,
-  "total_loc": 8315,
+  "total_loc": 8675,
   "language_distribution": {
-    "custom-methods": 8315
+    "custom-methods": 8675
   },
   "primary_languages": [
     "TypeScript"
@@ -61,12 +59,12 @@ The community or social layer is evidenced by helpers for comments (`addDeleteCo
       "repo_id": "github_sourabh2914-gif/custom-methods_1781762965760_aznwk6dua",
       "repo_name": "custom-methods",
       "primary_language": "TypeScript",
-      "architecture_md": "# Architecture\n\nThis project is a TypeScript library of custom automation helper methods, not a backend service or frontend application. It has no detected framework (no Express, Fastapi, or similar), no API endpoints, and no database schema. The sole runtime dependency listed in `package.json` is `@playwright/mcp`, which strongly suggests these helpers are designed to extend or integrate with a Playwright-based browser automation or MCP (Model Context Protocol) testing environment.\n\nAll 63 TypeScript source files live under a single flat directory, `walnut-methods/`. Each file exports one (occasionally two) `async function` that accepts a `WalnutContext` parameter — a pattern consistent with a plugin or custom-step library where a test runner or orchestration engine calls each function by name, passing a shared context object. There is no detected entry point (`entry_points` is null) and `package.json` points `main` to `index.js`, which likely re-exports all the individual method modules.\n\nThe project is CommonJS (`\"type\": \"commonjs\"`) with no build script configured beyond a placeholder test command. There are no test files detected, suggesting the methods themselves are consumed by an external test harness rather than tested in isolation within this repo.\n",
-      "domain_md": "# Domain\nInferred from code only — may be inaccurate for early-stage or generic projects.\n\nThis project appears to be a library of reusable browser automation steps for testing a healthcare scheduling application. Function names reference concepts like appointments (`clickAppointmentBySlot`, `verifyAppointmentInDayView`, `verifyAppointmentInWeekView`, `navigateToBookedDateInMonthView`), patients (`clickAvailableTimeSlotPatient`, `captureDobFromUi`), OTP-based authentication (`enterOtpFields`, `readOtpFromText`), and social/community features (`addDeleteCommentAndVerifyCount`, `clickLikeDislikeAndVerifyCount`, `shareAndVerifyCount`). The presence of group management helpers (`handleGroupAddition`, `handleGroupDeactivation`) and event attendance tracking (`captureAndIncrementEventCount`, `clickAttendAndStoreCount`) further suggests the target application combines a clinical scheduling workflow with a community or social engagement layer.\n\nThe likely users of this library are QA engineers or automation developers who write end-to-end test scenarios against the target web application. They call these `WalnutContext`-based methods as named steps within a higher-level test orchestration framework (likely Walnut, given the directory and context type names), rather than writing raw Playwright code for each repeated interaction.\n",
+      "architecture_md": "# Architecture\n\nThis project is a TypeScript library of custom automation helper methods, not a backend service or frontend application. It has no detected framework (no Express, Fastapi, or similar), no HTTP endpoints, and no database schema. The sole runtime dependency listed in `package.json` is `@playwright/mcp`, which strongly suggests these helpers are designed to extend or integrate with a Playwright-based browser automation or Model Context Protocol (MCP) environment.\n\nAll 66 TypeScript source files live under a single top-level directory, `walnut-methods/`. Each file exports one (occasionally two) async functions that accept a `WalnutContext` parameter — a context object that appears to be the runtime handle provided by the Walnut test automation platform. There is no explicit entry point (`main` in `package.json` points to `index.js` but no such file is tracked), so the library is likely consumed by an external test runner or orchestration layer that imports individual methods by name.\n\nThe project is compiled as CommonJS (`\"type\": \"commonjs\"`) and has no configured test runner or build script beyond a placeholder. This suggests it is in active development and intended to be imported as a collection of reusable step implementations rather than run standalone.\n",
+      "domain_md": "# Domain\nInferred from code only — may be inaccurate for early-stage or generic projects.\n\nThis project appears to be a library of reusable custom step methods for automated end-to-end testing of a web application, likely a healthcare or scheduling platform. Function names such as `clickAppointmentBySlot`, `verifyAppointmentInDayView`, `verifyAppointmentInWeekView`, `navigateToBookedDateInMonthView`, `clickAttendButton`, `clickLeaveButton`, and `captureDobFromUi` (date of birth) point strongly toward a product that manages appointments, patient records, and calendar-based scheduling. Additional methods like `handleGroupAddition`, `handleGroupDeactivation`, `addDeleteCommentAndVerifyCount`, `clickLikeDislikeAndVerifyCount`, and `shareAndVerifyCount` suggest the application also has social or community features such as groups, comments, likes, and shares.\n\nThe likely users of this library are QA engineers or automation engineers who write test scenarios against the target web application using the Walnut test platform. Each method encapsulates a reusable browser interaction or assertion — for example, reading an OTP from a text field, selecting a date from a calendar picker, capturing analytics graph values, or verifying sort order in a table — so that test authors can compose higher-level scenarios without re-implementing low-level Playwright interactions.\n",
       "top_level_dirs": [
         "walnut-methods"
       ],
-      "total_loc": 8315
+      "total_loc": 8675
     }
   ]
 }
