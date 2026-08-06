@@ -83,8 +83,16 @@ export async function findFirstUnassignedNurseNavigatorDate(ctx: WalnutContext) 
   // Returns { dateNumber: string } if found, null if not found.
   async function scanForFirstUnassignedDate(): Promise<{ dateNumber: string } | null> {
     const result: { dateNumber: string } | null = await c.page.evaluate(() => {
+      // Helper: get text from an element — innerText first (requires layout), then textContent
+      // (layout-independent). This handles cases where the grid has rendered in the DOM but
+      // the browser hasn't yet performed layout (innerText returns "" in that state).
+      function getText(el: Element): string {
+        return ((el as HTMLElement).innerText?.trim() ||
+                (el as HTMLElement).textContent?.trim() || '').toLowerCase();
+      }
+
       // Find all <button> elements that look like calendar date cards.
-      // Active date cards are <button> elements (disabled/past dates are <div> elements).
+      // Active date cards are <button> elements (disabled/past dates are <div> with opacity-60).
       // We identify calendar date buttons by their characteristic Tailwind classes:
       //   - contain "min-h-" in the class (min-h-[48px] or min-h-[64px])
       //   - are <button> elements (not divs)
@@ -100,32 +108,37 @@ export async function findFirstUnassignedNurseNavigatorDate(ctx: WalnutContext) 
         if (btn.hasAttribute('disabled')) return false;
         // Must NOT have opacity-60 (past/disabled styling)
         if (cls.includes('opacity-60')) return false;
-        // Must NOT be a day-of-week header (those don't contain date numbers)
-        // Day headers only have short text like "Sun", "Mon" — they don't have child spans
-        const spans = btn.querySelectorAll('span');
-        if (spans.length === 0) return false;
+        // Must have child spans (day-of-week headers have no spans; date cards always do)
+        if (btn.querySelectorAll('span').length === 0) return false;
         return true;
       });
 
-      // Among active date card buttons, find the first one whose text includes "Unassigned"
+      // Among active date card buttons, find the first Unassigned one.
+      // Detection uses TWO independent signals — either one is sufficient:
+      //   1. Text content contains "unassigned" (innerText OR textContent fallback)
+      //   2. CSS class contains "bg-red-50" (the Unassigned card colour from the DOM)
       for (const btn of dateCardButtons) {
-        const fullText = (btn as HTMLElement).innerText?.trim() ?? '';
-        if (fullText.toLowerCase().includes('unassigned')) {
-          // Extract the date number — it's in the first <span> child
-          // which contains only the numeric day (e.g. "21")
-          const spans = Array.from(btn.querySelectorAll('span'));
-          let dateNumber = '';
-          for (const span of spans) {
-            const t = (span as HTMLElement).innerText?.trim() ?? '';
-            // Date number: pure numeric, 1-2 digits
-            if (/^\d{1,2}$/.test(t)) {
-              dateNumber = t;
-              break;
-            }
+        const cls = btn.getAttribute('class') ?? '';
+        const fullText = getText(btn);
+        const isUnassigned =
+          fullText.includes('unassigned') ||
+          cls.includes('bg-red-50') ||
+          cls.includes('border-red-200');
+
+        if (!isUnassigned) continue;
+
+        // Extract the date number — it's in the first <span> whose text is purely numeric
+        const spans = Array.from(btn.querySelectorAll('span'));
+        let dateNumber = '';
+        for (const span of spans) {
+          const t = (getText(span)).trim();
+          if (/^\d{1,2}$/.test(t)) {
+            dateNumber = t;
+            break;
           }
-          if (dateNumber) {
-            return { dateNumber };
-          }
+        }
+        if (dateNumber) {
+          return { dateNumber };
         }
       }
 
@@ -218,35 +231,71 @@ export async function findFirstUnassignedNurseNavigatorDate(ctx: WalnutContext) 
   // ── Main loop: search current month, navigate forward if not found ────────────────────────────
   ctx.log('[NurseNavCalendar] Starting search for first active Unassigned date...');
 
+  let previousHeader = '';
+
   for (let monthsSearched = 0; monthsSearched < MAX_MONTHS; monthsSearched++) {
-    // Wait a moment for the calendar to fully render (especially after navigation)
-    if (monthsSearched > 0) {
-      await c.wait(800);
+
+    // ── Step A: wait for the calendar header to stabilize ──────────────────
+    // After navigation the header updates first; the date card grid re-renders
+    // slightly later. We poll until the header is non-empty AND different from
+    // the previous month (confirms the DOM has fully transitioned).
+    let currentHeader = '';
+    for (let poll = 0; poll < 20; poll++) {
+      currentHeader = await getCalendarHeaderText();
+      if (currentHeader && currentHeader !== previousHeader) break;
+      await c.wait(300);
     }
 
-    // Read the current month header
-    const headerText = await getCalendarHeaderText();
-    if (!headerText) {
-      ctx.warn(`[NurseNavCalendar] Could not read calendar header on attempt ${monthsSearched + 1} — waiting and retrying...`);
-      await c.wait(500);
-      const retryHeader = await getCalendarHeaderText();
-      if (!retryHeader) {
-        throw new Error(
-          '[NurseNavCalendar] Calendar header not found. ' +
-          'Ensure the Nurse Navigator Allocation tab is open and the calendar is visible.'
+    if (!currentHeader) {
+      throw new Error(
+        '[NurseNavCalendar] Calendar header not found. ' +
+        'Ensure the Nurse Navigator Allocation tab is open and the calendar is visible.'
+      );
+    }
+
+    // ── Step B: wait for the NEW month's grid to fully replace the old one ──
+    // Root cause: after clicking Next, the old month's buttons remain in the DOM
+    // while React re-renders. Any "do buttons exist?" check passes immediately on
+    // stale data. The only reliable signal the new grid has loaded is finding a
+    // button whose first numeric span is "1" (day 1 exists in every month).
+    // We use page.waitForFunction — a native Playwright poll — for reliability.
+    if (monthsSearched > 0) {
+      try {
+        await c.page.waitForFunction(
+          (expectedHeader: string) => {
+            // Confirm header already matches the new month
+            const spans = Array.from(document.querySelectorAll('span'));
+            const header = spans.find(s => /^[A-Za-z]+ \d{4}$/.test((s as HTMLElement).innerText?.trim() ?? ''));
+            if (!header) return false;
+            if ((header as HTMLElement).innerText?.trim() !== expectedHeader) return false;
+
+            // Confirm day "1" button is present in the new grid
+            const btns = Array.from(document.querySelectorAll('button'));
+            return btns.some(btn => {
+              const cls = btn.getAttribute('class') ?? '';
+              if (!cls.includes('min-h-')) return false;
+              const btnSpans = Array.from(btn.querySelectorAll('span'));
+              return btnSpans.some(sp => (sp as HTMLElement).textContent?.trim() === '1');
+            });
+          },
+          currentHeader,
+          { timeout: 10000 }
         );
+      } catch (_) {
+        // waitForFunction timed out — calendar may not have day "1" visible (e.g. starts on week 2)
+        // Fall back to a plain 1500ms wait and proceed anyway
+        ctx.warn(`[NurseNavCalendar] waitForFunction timed out for "${currentHeader}" — falling back to 1500ms wait`);
+        await c.wait(1500);
       }
     }
 
-    const currentHeader = await getCalendarHeaderText();
     ctx.log(`[NurseNavCalendar] Scanning month: "${currentHeader}" (attempt ${monthsSearched + 1}/${MAX_MONTHS})`);
 
-    // Scan for first active Unassigned date in this month
+    // ── Step C: scan for first active Unassigned date ─────────────────────
     const found = await scanForFirstUnassignedDate();
 
     if (found) {
       // ── Found an Unassigned date ─────────────────────────────────────────
-      // Extract month name from header (e.g. "September 2026" → "September")
       const headerParts = currentHeader.trim().split(' ');
       const monthName = headerParts[0] ?? '';
       const monthShort = toThreeLetterMonth(monthName); // e.g. "SEP"
@@ -254,7 +303,6 @@ export async function findFirstUnassignedNurseNavigatorDate(ctx: WalnutContext) 
 
       ctx.log(`[NurseNavCalendar] Found first active Unassigned date: ${monthShort} ${dateNumber}`);
 
-      // Store in runtime variables
       ctx.setVariable(monthVarName, monthShort);
       ctx.setVariable(dateVarName, dateNumber);
 
@@ -263,26 +311,14 @@ export async function findFirstUnassignedNurseNavigatorDate(ctx: WalnutContext) 
       return;
     }
 
-    // ── No Unassigned date found in this month — navigate to next month ────
+    // ── Step D: no Unassigned date — navigate to next month ───────────────
     ctx.log(`[NurseNavCalendar] No active Unassigned date found in "${currentHeader}" — navigating to next month...`);
+    previousHeader = currentHeader;
 
     await clickNextMonth();
 
-    // Wait for calendar to re-render after navigation
-    await c.wait(600);
-
-    // Verify the header changed (confirms navigation succeeded)
-    const newHeader = await getCalendarHeaderText();
-    if (newHeader === currentHeader) {
-      // Header didn't change — wait a bit more and check again
-      await c.wait(800);
-      const retryHeader = await getCalendarHeaderText();
-      if (retryHeader === currentHeader) {
-        ctx.warn(`[NurseNavCalendar] Calendar header did not change after clicking Next month (still "${currentHeader}"). Retrying click...`);
-        await clickNextMonth();
-        await c.wait(1000);
-      }
-    }
+    // Brief initial pause; the header-poll in Step A will wait for the rest.
+    await c.wait(400);
   }
 
   // ── Exhausted MAX_MONTHS without finding an Unassigned date ───────────────────────────────────
