@@ -109,8 +109,11 @@ export async function clickAttendButton(ctx: WalnutContext) {
     );
   }
 
-  // ── Step 5: Read attendee count AFTER click ───────────────────────────────────
-  const countAfter: number = await c.page.evaluate((rIdx: number) => {
+  // ── Step 5: Poll attendee count AFTER click until it changes ─────────────────
+  // The Leave button appears BEFORE the attendees cell re-renders. Reading the
+  // count immediately captures the stale value (e.g. 0 → 0). Poll until the
+  // cell value differs from countBefore, or time out.
+  const readCount = (rIdx: number): number => {
     const allRows = Array.from(document.querySelectorAll('tr'));
     const row = allRows[rIdx] as HTMLElement | undefined;
     if (!row) return -1;
@@ -120,7 +123,19 @@ export async function clickAttendButton(ctx: WalnutContext) {
     const raw = (countCell.textContent ?? '').trim();
     const match = raw.match(/^\d+$/);
     return match ? parseInt(raw, 10) : -1;
-  }, rowIndex);
+  };
+
+  let countAfter: number = countBefore;
+  const countStart = Date.now();
+
+  while (Date.now() - countStart < maxMs) {
+    await c.wait(pollMs);
+    countAfter = await c.page.evaluate(readCount, rowIndex);
+    if (countAfter !== -1 && countAfter !== countBefore) {
+      c.log(`Attendee count updated: ${countBefore} → ${countAfter}`);
+      break;
+    }
+  }
 
   if (countAfter === -1) {
     throw new Error(`Could not read attendee count AFTER click. Row index: ${rowIndex}`);
