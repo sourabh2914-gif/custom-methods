@@ -91,7 +91,11 @@ export async function hoverAndCaptureTooltip(ctx: WalnutContext) {
     // ── Helper: extract trimmed text from an element ─────────────────────────
     function extractText(el: Element | null): string {
       if (!el) return '';
-      return (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+      // Strip non-rendered text carriers — ApexCharts injects a <style> tag
+      // into the chart container; its CSS would otherwise leak into captures.
+      const clone = el.cloneNode(true) as Element;
+      clone.querySelectorAll('style, script, noscript, template').forEach((n) => n.remove());
+      return (clone.textContent ?? '').replace(/\s+/g, ' ').trim();
     }
 
     // ── Helper: check element is visually rendered ───────────────────────────
@@ -170,12 +174,78 @@ export async function hoverAndCaptureTooltip(ctx: WalnutContext) {
       } catch (_) { /* ignore XPath errors */ }
     }
 
-    // ── Strategy B: role="tooltip" (most reliable across libraries) ──────────
+    // ── Strategy B: ApexCharts values — formatted "Name: value" pairs ────────
+    // For ApexCharts DOMs the caller wants the series values, NOT raw tooltip
+    // text. Output: "Patient: 0, Family member: 10, Doctor: 1, Nurse: 1"
+    // (series order follows the chart legend/rel order; x-axis title excluded).
+    //   1) If the shared tooltip is rendered, read its series rows (display
+    //      names exactly as shown on screen).
+    //   2) Otherwise rebuild from the SVG: seriesName + val at the hovered
+    //      bar's j index (handles val="0"/barHeight="0" zero-height bars).
+    const hovered = resolveSelector(sel);
+    if (hovered) {
+      const chartScope: ParentNode =
+        hovered.closest('.apexcharts-canvas') ??
+        hovered.closest('.apexcharts-svg') ??
+        document;
+      const isApexChart = chartScope !== document
+        || hovered.closest('.apexcharts-series') !== null;
+      if (isApexChart) {
+        // 1) Rendered tooltip rows — class match must be the tooltip root
+        //    itself, not xaxistooltip / tooltip-title children.
+        const tooltipEl = Array.from(
+          chartScope.querySelectorAll('.apexcharts-tooltip')
+        ).find((el) => el.classList.contains('apexcharts-tooltip') && isVisible(el));
+        if (tooltipEl) {
+          const rows = Array.from(
+            tooltipEl.querySelectorAll('.apexcharts-tooltip-series-group')
+          );
+          const parts: string[] = [];
+          for (const row of rows) {
+            const labelEl = row.querySelector(
+              '.apexcharts-tooltip-text-y-label, .apexcharts-tooltip-text-label'
+            );
+            const valueEl = row.querySelector(
+              '.apexcharts-tooltip-text-y-value, .apexcharts-tooltip-text-value'
+            );
+            const label = (labelEl?.textContent ?? '').replace(/:\s*$/, '').trim();
+            const value = (valueEl?.textContent ?? '').trim();
+            if (label && value) parts.push(`${label}: ${value}`);
+          }
+          if (parts.length > 0) return parts.join(', ');
+        }
+        // 2) SVG reconstruction from seriesName + val at the hovered bar's j
+        const apexDataEl = hovered.hasAttribute('val')
+          ? hovered
+          : hovered.querySelector('[val]');
+        if (apexDataEl) {
+          const j = apexDataEl.getAttribute('j');
+          const parts: string[] = [];
+          const seriesGroups = Array.from(
+            chartScope.querySelectorAll('.apexcharts-series[seriesName]')
+          );
+          for (const g of seriesGroups) {
+            const name = g.getAttribute('seriesName');
+            const pathEl = j !== null
+              ? g.querySelector(`[j="${j}"][val]`)
+              : g.querySelector('[val]');
+            const val = pathEl ? pathEl.getAttribute('val') : null;
+            if (name && val !== null) parts.push(`${name}: ${val}`);
+          }
+          if (parts.length > 0) return parts.join(', ');
+        }
+      }
+    }
+
+    // ── Strategy C: role="tooltip" (most reliable across libraries) ──────────
     const roleTooltips = Array.from(document.querySelectorAll('[role="tooltip"]'))
       .filter(isVisible);
-    if (roleTooltips.length > 0) return extractText(roleTooltips[0]);
+    for (const rt of roleTooltips) {
+      const rtText = extractText(rt);
+      if (rtText) return rtText;
+    }
 
-    // ── Strategy B: common tooltip/chart class names ─────────────────────────
+    // ── Strategy D: common tooltip/chart class names ─────────────────────────
     const classSelectors = [
       '[class*="tooltip"]',
       '[class*="Tooltip"]',
@@ -189,13 +259,17 @@ export async function hoverAndCaptureTooltip(ctx: WalnutContext) {
     ];
     for (const cs of classSelectors) {
       const els = Array.from(document.querySelectorAll(cs)).filter(isVisible);
-      if (els.length > 0) return extractText(els[0]);
+      // Skip empty/junk containers — an empty hit must not short-circuit the
+      // remaining strategies (this was how raw CSS got captured).
+      for (const el of els) {
+        const elText = extractText(el);
+        if (elText) return elText;
+      }
     }
 
-    // ── Strategy C: attributes on the hovered element itself ─────────────────
+    // ── Strategy E: attributes on the hovered element itself ─────────────────
     // Uses resolveSelector() so XPath strings are handled via document.evaluate
     // instead of the CSS-only document.querySelector — this was the crash source.
-    const hovered = resolveSelector(sel);
     if (hovered) {
       const describedById = hovered.getAttribute('aria-describedby');
       if (describedById) {
@@ -207,48 +281,7 @@ export async function hoverAndCaptureTooltip(ctx: WalnutContext) {
       if (dataTip) return dataTip.trim();
     }
 
-    // ── Strategy D: ApexCharts SVG series reconstruction ─────────────────────
-    // Handles this chart DOM when no rendered tooltip element is found:
-    //   <g class="apexcharts-bar-series apexcharts-plot-series">
-    //     <g class="apexcharts-series" rel="1" seriesName="Patient" data:realIndex="0">
-    //     <g class="apexcharts-series" rel="4" seriesName="Nurse" data:realIndex="3">
-    //       <path class="apexcharts-bar-area" index="3" j="0" val="1"
-    //             barHeight="21.48" barWidth="16.88" cx="185.78" cy="193.37"/>
-    // Rebuilds the tooltip text from seriesName + j + val attributes, e.g.:
-    //   "AUG 12 Patient: 0 Family member: 10 Doctor: 1 Nurse: 1"
-    if (hovered) {
-      const apexDataEl = hovered.hasAttribute('val')
-        ? hovered
-        : hovered.querySelector('[val]');
-      if (apexDataEl) {
-        const j = apexDataEl.getAttribute('j');
-        const chartScope: ParentNode =
-          hovered.closest('.apexcharts-canvas') ??
-          hovered.closest('.apexcharts-svg') ??
-          document;
-        const parts: string[] = [];
-        // X-axis category label from the active x-axis tooltip, if rendered
-        const xTip = chartScope.querySelector('.apexcharts-xaxistooltip.apexcharts-active');
-        if (xTip && isVisible(xTip)) {
-          const xText = extractText(xTip);
-          if (xText) parts.push(xText);
-        }
-        const seriesGroups = Array.from(
-          chartScope.querySelectorAll('.apexcharts-series[seriesName]')
-        );
-        for (const g of seriesGroups) {
-          const name = g.getAttribute('seriesName');
-          const pathEl = j !== null
-            ? g.querySelector(`[j="${j}"][val]`)
-            : g.querySelector('[val]');
-          const val = pathEl ? pathEl.getAttribute('val') : null;
-          if (name && val !== null) parts.push(`${name}: ${val}`);
-        }
-        if (parts.length > 0) return parts.join(' ');
-      }
-    }
-
-    // ── Strategy E: visible floating div/span containing a number ────────────
+    // ── Strategy F: visible floating div/span containing a number ────────────
     // Fallback for custom chart overlays (position: absolute/fixed, has digits)
     const floaters = Array.from(document.querySelectorAll('div, span, ul'))
       .filter((el) => {
