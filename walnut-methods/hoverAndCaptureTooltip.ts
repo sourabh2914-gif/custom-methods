@@ -19,8 +19,65 @@ export async function hoverAndCaptureTooltip(ctx: WalnutContext) {
 
   ctx.log(`[HoverAndCaptureTooltip] Hovering on: "${selector}"`);
 
-  // 1. Playwright hover — supports both CSS selectors and XPath expressions natively
-  await c.hover(selector);
+  // 1. Hover the target.
+  //    ApexCharts bar paths with val="0" render as zero-height shapes
+  //    (barHeight="0") — an empty bounding box that Playwright's hover()
+  //    cannot target. For those SVG shapes, move the raw mouse to the
+  //    path's cx/cy point instead so the shared tooltip still triggers.
+  //    Example DOM:
+  //      <g class="apexcharts-series" seriesName="Nurse" data:realIndex="3">
+  //        <path class="apexcharts-bar-area" j="1" val="0" barHeight="0"
+  //              cx="298.37" cy="214.86" .../>
+  //      </g>
+  const svgHoverPoint: { x: number; y: number } | null = await c.page.evaluate((sel: string) => {
+    // Strip explicit "xpath=" engine prefix so every XPath form is detected
+    const t = sel.trim();
+    const q = t.startsWith('xpath=') ? t.slice(6) : t;
+    const isXPath = q.startsWith('//') || q.startsWith('(') || q.startsWith('/');
+    let el: Element | null = null;
+    try {
+      if (isXPath) {
+        el = document.evaluate(q, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null)
+          .singleNodeValue as Element | null;
+      } else {
+        el = document.querySelector(q);
+      }
+    } catch (_) {
+      return null;
+    }
+    if (!el) return null;
+    const svgEl = el as SVGGraphicsElement;
+    const svgRoot = svgEl.ownerSVGElement;
+    if (!svgRoot) return null;                       // not SVG → normal hover
+    const r = el.getBoundingClientRect();
+    if (r.width >= 1 && r.height >= 1) return null;  // hittable → normal hover
+    const cx = parseFloat(el.getAttribute('cx') ?? '');
+    const cy = parseFloat(el.getAttribute('cy') ?? '');
+    if (Number.isFinite(cx) && Number.isFinite(cy)) {
+      const m = svgEl.getScreenCTM();
+      if (!m) return null;
+      const pt = svgRoot.createSVGPoint();
+      pt.x = cx;
+      pt.y = cy;
+      const screen = pt.matrixTransform(m);
+      // Nudge a few px above the baseline so the point sits inside the plot area
+      return { x: screen.x, y: screen.y - 5 };
+    }
+    return { x: r.x + r.width / 2, y: r.y - 5 };
+  }, selector);
+
+  if (svgHoverPoint) {
+    ctx.log(`[HoverAndCaptureTooltip] Zero-size SVG target — hovering at (${svgHoverPoint.x.toFixed(1)}, ${svgHoverPoint.y.toFixed(1)})`);
+    await c.mouseMove(svgHoverPoint.x, svgHoverPoint.y);
+  } else {
+    // Playwright hover. Force the xpath engine for XPath strings — Playwright
+    // only auto-detects selectors starting with "//", so wrapped forms like
+    // "(//path)[1]" or absolute "/html/..." need the explicit "xpath=" prefix.
+    const t = selector.trim();
+    const isXpathForm = !t.startsWith('xpath=')
+      && (t.startsWith('//') || t.startsWith('(') || t.startsWith('/'));
+    await c.hover(isXpathForm ? 'xpath=' + t : selector);
+  }
 
   // 2. Hold cursor in place for 3.5 s — enough for chart tooltip to fully render
   await c.wait(3500);
@@ -51,11 +108,14 @@ export async function hoverAndCaptureTooltip(ctx: WalnutContext) {
     // document.querySelector() only accepts CSS — XPath strings starting with
     // "//" or "(" must use document.evaluate() instead.
     function resolveSelector(s: string): Element | null {
-      const isXPath = s.trimStart().startsWith('//') || s.trimStart().startsWith('(');
+      // Strip explicit "xpath=" engine prefix — document.evaluate needs the raw XPath
+      const t = s.trim();
+      const q = t.startsWith('xpath=') ? t.slice(6) : t;
+      const isXPath = q.startsWith('//') || q.startsWith('(') || q.startsWith('/');
       if (isXPath) {
         try {
           const result = document.evaluate(
-            s, document, null,
+            q, document, null,
             XPathResult.FIRST_ORDERED_NODE_TYPE, null
           );
           return (result.singleNodeValue as Element | null) ?? null;
@@ -64,7 +124,7 @@ export async function hoverAndCaptureTooltip(ctx: WalnutContext) {
         }
       }
       try {
-        return document.querySelector(s);
+        return document.querySelector(q);
       } catch (_) {
         return null;
       }
@@ -90,10 +150,12 @@ export async function hoverAndCaptureTooltip(ctx: WalnutContext) {
     }
     // Broader fallback: XPath may match multiple nodes — scan all of them for a <title>
     // Only do this when the selector is XPath (starts with "//" or "(")
-    if (sel.trimStart().startsWith('//') || sel.trimStart().startsWith('(')) {
+    const selT = sel.trim();
+    const selQ = selT.startsWith('xpath=') ? selT.slice(6) : selT;
+    if (selQ.startsWith('//') || selQ.startsWith('(') || selQ.startsWith('/')) {
       try {
         const xpathResult = document.evaluate(
-          sel, document, null,
+          selQ, document, null,
           XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null
         );
         for (let i = 0; i < xpathResult.snapshotLength; i++) {
@@ -145,7 +207,48 @@ export async function hoverAndCaptureTooltip(ctx: WalnutContext) {
       if (dataTip) return dataTip.trim();
     }
 
-    // ── Strategy D: visible floating div/span containing a number ────────────
+    // ── Strategy D: ApexCharts SVG series reconstruction ─────────────────────
+    // Handles this chart DOM when no rendered tooltip element is found:
+    //   <g class="apexcharts-bar-series apexcharts-plot-series">
+    //     <g class="apexcharts-series" rel="1" seriesName="Patient" data:realIndex="0">
+    //     <g class="apexcharts-series" rel="4" seriesName="Nurse" data:realIndex="3">
+    //       <path class="apexcharts-bar-area" index="3" j="0" val="1"
+    //             barHeight="21.48" barWidth="16.88" cx="185.78" cy="193.37"/>
+    // Rebuilds the tooltip text from seriesName + j + val attributes, e.g.:
+    //   "AUG 12 Patient: 0 Family member: 10 Doctor: 1 Nurse: 1"
+    if (hovered) {
+      const apexDataEl = hovered.hasAttribute('val')
+        ? hovered
+        : hovered.querySelector('[val]');
+      if (apexDataEl) {
+        const j = apexDataEl.getAttribute('j');
+        const chartScope: ParentNode =
+          hovered.closest('.apexcharts-canvas') ??
+          hovered.closest('.apexcharts-svg') ??
+          document;
+        const parts: string[] = [];
+        // X-axis category label from the active x-axis tooltip, if rendered
+        const xTip = chartScope.querySelector('.apexcharts-xaxistooltip.apexcharts-active');
+        if (xTip && isVisible(xTip)) {
+          const xText = extractText(xTip);
+          if (xText) parts.push(xText);
+        }
+        const seriesGroups = Array.from(
+          chartScope.querySelectorAll('.apexcharts-series[seriesName]')
+        );
+        for (const g of seriesGroups) {
+          const name = g.getAttribute('seriesName');
+          const pathEl = j !== null
+            ? g.querySelector(`[j="${j}"][val]`)
+            : g.querySelector('[val]');
+          const val = pathEl ? pathEl.getAttribute('val') : null;
+          if (name && val !== null) parts.push(`${name}: ${val}`);
+        }
+        if (parts.length > 0) return parts.join(' ');
+      }
+    }
+
+    // ── Strategy E: visible floating div/span containing a number ────────────
     // Fallback for custom chart overlays (position: absolute/fixed, has digits)
     const floaters = Array.from(document.querySelectorAll('div, span, ul'))
       .filter((el) => {
