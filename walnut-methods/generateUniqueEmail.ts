@@ -34,20 +34,28 @@ export async function generateUniqueEmail(ctx: WalnutContext) {
   const username = tagMatch ? tagMatch[1] : localPart;
   const parsedN = tagMatch ? parseInt(tagMatch[2], 10) : null;
 
-  // Track the last used number per base address (in the shared variable context)
-  // so successive calls never reuse a previously generated email, even if the
-  // input variable still holds the original un-tagged address.
-  const counterKey = `__uniqueEmail_lastN:${username}@${domain}`;
-  const storedRaw = ctx.getVariable(counterKey);
-  const storedN = storedRaw !== undefined && storedRaw !== null && storedRaw !== ''
-    ? parseInt(String(storedRaw), 10)
-    : NaN;
+  // ── Determine the next number ─────────────────────────────────────────────
+  // Cross-step state lives in the DECLARED output runtime variable itself:
+  // each call reads back the previously generated email from $[uniqueEmail]
+  // (same proven mechanism as "Capture and Increment Event Count").
+  // Hidden/internal variable keys are NOT used — they are not reliably
+  // persisted between steps.
+  const baseKey = `${username}@${domain}`.toLowerCase();
 
-  // next = one past the highest of (last used number, number already in the input).
-  // - No tag, never generated before: max(0, 1) + 1 = 2  → starts at +2
-  // - Input already has +N:           N + 1
-  // - Previously generated +N:        N + 1 (never repeats)
-  const next = Math.max(isNaN(storedN) ? 0 : storedN, parsedN !== null ? parsedN : 1) + 1;
+  let prevN: number | null = null;
+  const prevEmail = String(ctx.getVariable(outputVar) ?? '').trim();
+  if (prevEmail) {
+    const prevMatch = prevEmail.match(/^(.*)\+(\d+)@([^@\s]+)$/);
+    if (prevMatch && `${prevMatch[1]}@${prevMatch[3]}`.toLowerCase() === baseKey) {
+      prevN = parseInt(prevMatch[2], 10); // previous email was generated from this same base
+    }
+  }
+
+  // next = one past the highest of (number in previous output, number in input).
+  // - No tag anywhere, first call:  max(1, 1) + 1 = 2  → starts at +2
+  // - Previous output has +N:       N + 1  → +2 → +3 → +4 …
+  // - Input itself has +N:          N + 1
+  const next = Math.max(prevN ?? 1, parsedN ?? 1) + 1;
 
   const uniqueEmail = `${username}+${next}@${domain}`;
 
@@ -55,7 +63,9 @@ export async function generateUniqueEmail(ctx: WalnutContext) {
     throw new Error(`[GenerateUniqueEmail] Generated address "${uniqueEmail}" is not a valid email address.`);
   }
 
-  ctx.setVariable(counterKey, String(next));
   ctx.setVariable(outputVar, uniqueEmail);
-  ctx.log(`[GenerateUniqueEmail] "${baseEmail}" → "${uniqueEmail}" stored in $[${outputVar}]`);
+  ctx.log(
+    `[GenerateUniqueEmail] "${baseEmail}" → "${uniqueEmail}" stored in $[${outputVar}]` +
+    (prevEmail ? ` (previous: "${prevEmail}")` : ' (first generation)')
+  );
 }
