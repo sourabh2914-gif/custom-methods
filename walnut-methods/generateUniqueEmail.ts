@@ -1,4 +1,7 @@
 import type { WalnutContext } from './walnut';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 /** @walnut_method
  * name: Generate Unique Email
@@ -8,6 +11,26 @@ import type { WalnutContext } from './walnut';
  * needsLocator: false
  * category: Data Processing
  */
+
+// Persistent counter store — survives across steps AND across test runs.
+// Runtime variables reset every run, so increment-on-every-call (even across
+// runs) requires on-disk state. One counter per base address (username@domain).
+const COUNTER_FILE = path.join(os.tmpdir(), 'walnut-unique-email-counters.json');
+
+function readCounters(): Record<string, number> {
+  try {
+    if (fs.existsSync(COUNTER_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(COUNTER_FILE, 'utf8'));
+      if (parsed && typeof parsed === 'object') return parsed;
+    }
+  } catch (_) { /* corrupted/missing file → start fresh and overwrite below */ }
+  return {};
+}
+
+function writeCounters(counters: Record<string, number>): void {
+  fs.writeFileSync(COUNTER_FILE, JSON.stringify(counters, null, 2), 'utf8');
+}
+
 export async function generateUniqueEmail(ctx: WalnutContext) {
   // ctx.args[0] = value of ${baseEmail} — the base email entered as a local variable (test data)
   // ctx.args[1] = "uniqueEmail" (from $[uniqueEmail]) — runtime variable name to store the generated email into
@@ -34,28 +57,27 @@ export async function generateUniqueEmail(ctx: WalnutContext) {
   const username = tagMatch ? tagMatch[1] : localPart;
   const parsedN = tagMatch ? parseInt(tagMatch[2], 10) : null;
 
-  // ── Determine the next number ─────────────────────────────────────────────
-  // Cross-step state lives in the DECLARED output runtime variable itself:
-  // each call reads back the previously generated email from $[uniqueEmail]
-  // (same proven mechanism as "Capture and Increment Event Count").
-  // Hidden/internal variable keys are NOT used — they are not reliably
-  // persisted between steps.
   const baseKey = `${username}@${domain}`.toLowerCase();
 
+  // Candidate 1 — persistent on-disk counter (increments across steps and runs)
+  const counters = readCounters();
+  const fileN = typeof counters[baseKey] === 'number' ? counters[baseKey] : null;
+
+  // Candidate 2 — previous value of the output runtime variable (same-run chaining)
   let prevN: number | null = null;
   const prevEmail = String(ctx.getVariable(outputVar) ?? '').trim();
   if (prevEmail) {
     const prevMatch = prevEmail.match(/^(.*)\+(\d+)@([^@\s]+)$/);
     if (prevMatch && `${prevMatch[1]}@${prevMatch[3]}`.toLowerCase() === baseKey) {
-      prevN = parseInt(prevMatch[2], 10); // previous email was generated from this same base
+      prevN = parseInt(prevMatch[2], 10);
     }
   }
 
-  // next = one past the highest of (number in previous output, number in input).
-  // - No tag anywhere, first call:  max(1, 1) + 1 = 2  → starts at +2
-  // - Previous output has +N:       N + 1  → +2 → +3 → +4 …
-  // - Input itself has +N:          N + 1
-  const next = Math.max(prevN ?? 1, parsedN ?? 1) + 1;
+  // Candidate 3 — "+N" tag already present in the base email itself
+  // next = one past the highest known number:
+  // - Nothing seen before:  max(1, 1, 1) + 1 = 2  → starts at +2
+  // - Any prior +N:         N + 1  → +2 → +3 → +4 → +5 … (never repeats)
+  const next = Math.max(fileN ?? 1, prevN ?? 1, parsedN ?? 1) + 1;
 
   const uniqueEmail = `${username}+${next}@${domain}`;
 
@@ -63,9 +85,13 @@ export async function generateUniqueEmail(ctx: WalnutContext) {
     throw new Error(`[GenerateUniqueEmail] Generated address "${uniqueEmail}" is not a valid email address.`);
   }
 
+  // Persist the counter so the NEXT call/run continues from here
+  counters[baseKey] = next;
+  writeCounters(counters);
+
   ctx.setVariable(outputVar, uniqueEmail);
   ctx.log(
-    `[GenerateUniqueEmail] "${baseEmail}" → "${uniqueEmail}" stored in $[${outputVar}]` +
-    (prevEmail ? ` (previous: "${prevEmail}")` : ' (first generation)')
+    `[GenerateUniqueEmail] "${baseEmail}" → "${uniqueEmail}" stored in $[${outputVar}] ` +
+    `(counter for ${baseKey} is now ${next}; stored in ${COUNTER_FILE})`
   );
 }
