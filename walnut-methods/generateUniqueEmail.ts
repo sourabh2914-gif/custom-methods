@@ -2,27 +2,26 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Generate Unique Email
- * description: Generate a unique email address from $[baseEmail] and store in $[uniqueEmail]
+ * description: Generate a unique email address from ${baseEmail} and store in $[uniqueEmail]
  * actionType: custom_generate_unique_email
  * context: shared
  * needsLocator: false
  * category: Data Processing
  */
 export async function generateUniqueEmail(ctx: WalnutContext) {
-  // ctx.args[0] = "baseEmail" (from $[baseEmail]) — name of the runtime variable holding the base email
+  // ctx.args[0] = value of ${baseEmail} — the base email entered as a local variable (test data)
   // ctx.args[1] = "uniqueEmail" (from $[uniqueEmail]) — runtime variable name to store the generated email into
-  const baseEmailVar = ctx.args[0];
+  const baseEmail = String(ctx.args[0] ?? '').trim();
   const outputVar = ctx.args[1];
 
-  const baseEmail = String(ctx.getVariable(baseEmailVar) ?? '').trim();
   if (!baseEmail) {
-    throw new Error(`[GenerateUniqueEmail] Runtime variable $[${baseEmailVar}] is empty or not set.`);
+    throw new Error('[GenerateUniqueEmail] ${baseEmail} is empty — enter a base email in the local variable (test data).');
   }
 
   // Basic structural validation — must be a plausible email address
   const emailPattern = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
   if (!emailPattern.test(baseEmail)) {
-    throw new Error(`[GenerateUniqueEmail] "$[${baseEmailVar}]" = "${baseEmail}" is not a valid email address.`);
+    throw new Error(`[GenerateUniqueEmail] "${baseEmail}" is not a valid email address.`);
   }
 
   // Split into local part and domain at the last '@'
