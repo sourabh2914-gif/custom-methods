@@ -1,7 +1,4 @@
 import type { WalnutContext } from './walnut';
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
 
 /** @walnut_method
  * name: Generate Unique Email
@@ -12,24 +9,13 @@ import * as path from 'path';
  * category: Data Processing
  */
 
-// Persistent counter store — survives across steps AND across test runs.
-// Runtime variables reset every run, so increment-on-every-call (even across
-// runs) requires on-disk state. One counter per base address (username@domain).
-const COUNTER_FILE = path.join(os.tmpdir(), 'walnut-unique-email-counters.json');
-
-function readCounters(): Record<string, number> {
-  try {
-    if (fs.existsSync(COUNTER_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(COUNTER_FILE, 'utf8'));
-      if (parsed && typeof parsed === 'object') return parsed;
-    }
-  } catch (_) { /* corrupted/missing file → start fresh and overwrite below */ }
-  return {};
-}
-
-function writeCounters(counters: Record<string, number>): void {
-  fs.writeFileSync(COUNTER_FILE, JSON.stringify(counters, null, 2), 'utf8');
-}
+// Number is derived from the current time (seconds since 2024-01-01 UTC).
+// It strictly increases on every call and every run — no state needs to
+// survive between runs (runtime variables reset per run, and local files do
+// not persist on remote/ephemeral runners). This guarantees a new, larger,
+// never-before-used email every single time.
+const TIME_EPOCH_MS = Date.UTC(2024, 0, 1); // 2024-01-01T00:00:00Z
+const METHOD_VERSION = 'v4';
 
 export async function generateUniqueEmail(ctx: WalnutContext) {
   // ctx.args[0] = value of ${baseEmail} — the base email entered as a local variable (test data)
@@ -59,11 +45,12 @@ export async function generateUniqueEmail(ctx: WalnutContext) {
 
   const baseKey = `${username}@${domain}`.toLowerCase();
 
-  // Candidate 1 — persistent on-disk counter (increments across steps and runs)
-  const counters = readCounters();
-  const fileN = typeof counters[baseKey] === 'number' ? counters[baseKey] : null;
+  // Time-based number — increases by 1 every second, forever
+  const timeN = Math.floor((Date.now() - TIME_EPOCH_MS) / 1000);
 
-  // Candidate 2 — previous value of the output runtime variable (same-run chaining)
+  // Same-run chaining: if the output variable already holds an email generated
+  // from this same base, continue above its number (covers multiple calls
+  // landing within the same second)
   let prevN: number | null = null;
   const prevEmail = String(ctx.getVariable(outputVar) ?? '').trim();
   if (prevEmail) {
@@ -73,11 +60,9 @@ export async function generateUniqueEmail(ctx: WalnutContext) {
     }
   }
 
-  // Candidate 3 — "+N" tag already present in the base email itself
-  // next = one past the highest known number:
-  // - Nothing seen before:  max(1, 1, 1) + 1 = 2  → starts at +2
-  // - Any prior +N:         N + 1  → +2 → +3 → +4 → +5 … (never repeats)
-  const next = Math.max(fileN ?? 1, prevN ?? 1, parsedN ?? 1) + 1;
+  // next = one past the highest known number (time dominates, so every
+  // call/run produces a larger number than anything generated before)
+  const next = Math.max(timeN, prevN ?? 0, parsedN ?? 0) + 1;
 
   const uniqueEmail = `${username}+${next}@${domain}`;
 
@@ -85,13 +70,6 @@ export async function generateUniqueEmail(ctx: WalnutContext) {
     throw new Error(`[GenerateUniqueEmail] Generated address "${uniqueEmail}" is not a valid email address.`);
   }
 
-  // Persist the counter so the NEXT call/run continues from here
-  counters[baseKey] = next;
-  writeCounters(counters);
-
   ctx.setVariable(outputVar, uniqueEmail);
-  ctx.log(
-    `[GenerateUniqueEmail] "${baseEmail}" → "${uniqueEmail}" stored in $[${outputVar}] ` +
-    `(counter for ${baseKey} is now ${next}; stored in ${COUNTER_FILE})`
-  );
+  ctx.log(`[GenerateUniqueEmail ${METHOD_VERSION}] "${baseEmail}" → "${uniqueEmail}" stored in $[${outputVar}]`);
 }
