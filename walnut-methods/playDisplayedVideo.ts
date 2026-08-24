@@ -2,7 +2,7 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Play Displayed Video
- * description: Find the currently displayed video and start playing it
+ * description: Find the currently displayed video, play it for ${playSeconds} seconds and pause automatically
  * actionType: custom_play_displayed_video
  * context: web
  * needsLocator: false
@@ -13,6 +13,11 @@ export async function playDisplayedVideo(ctx: WalnutContext) {
 
   const page = ctx.page;
   const LOG = '[PlayDisplayedVideo]';
+
+  // How long the video is allowed to play before it is paused automatically.
+  // Configurable per step via ${playSeconds}; falls back to 5s if missing/invalid.
+  const playSecondsArg = parseInt(ctx.args[0], 10);
+  const PLAY_DURATION_MS = (isNaN(playSecondsArg) || playSecondsArg <= 0 ? 5 : playSecondsArg) * 1000;
 
   // Play-button selectors inside a player frame, in priority order.
   // Covers YouTube mobile embed (ytmCuedOverlayPlayButton), YouTube desktop
@@ -78,6 +83,51 @@ export async function playDisplayedVideo(ctx: WalnutContext) {
     }
   };
 
+  const isPaused = async (frame: any): Promise<boolean> => {
+    try {
+      return await frame.evaluate(() => {
+        const v = document.querySelector('video');
+        return !!v && (v.paused || v.ended);
+      });
+    } catch {
+      return false;
+    }
+  };
+
+  const pauseViaJs = async (frame: any): Promise<void> => {
+    try {
+      await frame.evaluate(() => {
+        const v = document.querySelector('video') as any;
+        if (v && typeof v.pause === 'function') v.pause();
+      });
+    } catch {
+      // ignore — final verification will report failure if this did not help
+    }
+  };
+
+  // Pause-button selectors inside a player frame. Players relabel their
+  // play/pause toggle to "Pause" while the video is playing.
+  const PAUSE_BUTTON_SELECTORS = [
+    'button[aria-label*="Pause" i]',
+    '.vjs-playing .vjs-play-control',
+  ];
+
+  const clickPauseInFrame = async (frame: any): Promise<boolean> => {
+    for (const sel of PAUSE_BUTTON_SELECTORS) {
+      try {
+        const btn = await frame.$(sel);
+        if (btn && (await btn.isVisible())) {
+          await btn.click({ timeout: 3000 });
+          ctx.log(`${LOG} Clicked pause button: ${sel}`);
+          return true;
+        }
+      } catch {
+        // selector not present/clickable in this player — try the next one
+      }
+    }
+    return false;
+  };
+
   // --- 1. Locate the currently displayed video -----------------------------
   // Prefer visible iframes whose src points at a known video provider; the
   // embed URL changes with each user selection, so match the provider only.
@@ -136,38 +186,61 @@ export async function playDisplayedVideo(ctx: WalnutContext) {
 
   // --- 2. Start playback ----------------------------------------------------
   if (await hasPlaybackStarted(targetFrame)) {
-    ctx.log(`${LOG} Video is already playing — nothing to do.`);
-    return;
-  }
+    ctx.log(`${LOG} Video is already playing — skipping Play click.`);
+  } else {
+    let clicked = await clickPlayInFrame(targetFrame);
 
-  let clicked = await clickPlayInFrame(targetFrame);
-
-  // Fallback: click the centre of the player surface (some players only
-  // respond to a click on the video/thumbnail overlay itself)
-  if (!clicked && targetIframeHandle) {
-    try {
-      const box = await targetIframeHandle.boundingBox();
-      if (box) {
-        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-        ctx.log(`${LOG} No play button found — clicked centre of the player`);
-        clicked = true;
+    // Fallback: click the centre of the player surface (some players only
+    // respond to a click on the video/thumbnail overlay itself)
+    if (!clicked && targetIframeHandle) {
+      try {
+        const box = await targetIframeHandle.boundingBox();
+        if (box) {
+          await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+          ctx.log(`${LOG} No play button found — clicked centre of the player`);
+          clicked = true;
+        }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
+    }
+
+    // Give the player a moment; if playback has not started, force it via JS
+    await ctx.wait(1000);
+    if (!(await hasPlaybackStarted(targetFrame))) {
+      ctx.log(`${LOG} Playback not started after click — forcing play via video.play()`);
+      await forcePlayViaJs(targetFrame);
+    }
+
+    // --- 3. Confirm the video STARTED playing (not completion) --------------
+    if (!(await waitForPlaybackStart(targetFrame))) {
+      throw new Error(`${LOG} Video did not start playing after clicking Play`);
     }
   }
 
-  // Give the player a moment; if playback has not started, force it via JS
-  await ctx.wait(1000);
-  if (!(await hasPlaybackStarted(targetFrame))) {
-    ctx.log(`${LOG} Playback not started after click — forcing play via video.play()`);
-    await forcePlayViaJs(targetFrame);
+  ctx.log(`${LOG} Video started playing — letting it play for ${PLAY_DURATION_MS / 1000}s...`);
+
+  // --- 4. Let it play briefly, then pause automatically ---------------------
+  await ctx.wait(PLAY_DURATION_MS);
+
+  if (!(await clickPauseInFrame(targetFrame))) {
+    ctx.log(`${LOG} No pause button clickable — pausing via video.pause()`);
+    await pauseViaJs(targetFrame);
   }
 
-  // --- 3. Confirm the video STARTED playing (not completion) ----------------
-  if (!(await waitForPlaybackStart(targetFrame))) {
-    throw new Error(`${LOG} Video did not start playing after clicking Play`);
+  // Confirm the video is actually paused (retry JS pause once if needed)
+  let paused = false;
+  for (let i = 0; i < 10; i++) {
+    if (await isPaused(targetFrame)) {
+      paused = true;
+      break;
+    }
+    if (i === 4) await pauseViaJs(targetFrame); // retry once mid-way
+    await ctx.wait(500);
+  }
+  if (!paused) {
+    throw new Error(`${LOG} Video did not pause after ${PLAY_DURATION_MS / 1000}s of playback`);
   }
 
-  ctx.log(`${LOG} Video started playing successfully.`);
+  ctx.log(`${LOG} Video paused automatically after ${PLAY_DURATION_MS / 1000}s of playback.`);
 }
