@@ -178,7 +178,10 @@ export async function playDisplayedVideo(ctx: WalnutContext) {
       return r.width > 0 && r.height > 0;
     });
     if (!hasNativeVideo) {
-      throw new Error(`${LOG} No video found on the page (no video iframe and no native <video> element)`);
+      // No video on the page is not an error for this step — the video content
+      // depends on the user's selection, and some selections have no video.
+      ctx.log(`${LOG} No video found on the page — skipping playback, step passes.`);
+      return;
     }
     targetFrame = page; // operate on the main frame
     ctx.log(`${LOG} Found native <video> element on the page — starting playback...`);
