@@ -2,7 +2,7 @@ import type { WalnutWebContext } from './walnut';
 
 /** @walnut_method
  * name: Select Run-Owned Browser Tab
- * description: Select the open tab for ${target_url}; for Temp-Mail, match this run's stored generated email
+ * description: Find the open tab for ${target_url}; for Temp-Mail, match this run's stored generated email
  * actionType: custom_select_run_owned_browser_tab
  * context: web
  * needsLocator: false
@@ -57,6 +57,8 @@ export async function selectRunOwnedBrowserTab(ctx: WalnutWebContext) {
     throw new Error(`Expected exactly one open tab for ${targetName}, found ${matches.length}; no tab was changed`);
   }
 
-  await ctx.switchToTab(matches[0]);
-  ctx.log(`Selected ${isTempMailTarget ? 'the current-run Temp-Mail inbox' : 'the HHCS Doctor form'} tab at its live index ${matches[0]}`);
+  const index = matches[0];
+  ctx.setVariable(isTempMailTarget ? 'temp_mail_tab_index' : 'hhcs_tab_index', String(index));
+  await ctx.switchToTab(index);
+  ctx.log(`Matched ${isTempMailTarget ? 'the current-run Temp-Mail inbox' : 'the HHCS Doctor form'} tab at its live index ${index}`);
 }
