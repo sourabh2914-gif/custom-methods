@@ -2,7 +2,7 @@ import type { WalnutWebContext } from './walnut';
 
 /** @walnut_method
  * name: Select Run-Owned Browser Tab
- * description: Select the open tab for ${target_url} and, when supplied, this run's inbox $[generated_email]
+ * description: Select the open tab for ${target_url}; for Temp-Mail, match this run's stored generated email
  * actionType: custom_select_run_owned_browser_tab
  * context: web
  * needsLocator: false
@@ -10,7 +10,7 @@ import type { WalnutWebContext } from './walnut';
  */
 export async function selectRunOwnedBrowserTab(ctx: WalnutWebContext) {
   const targetUrl = ctx.args[0]?.trim();
-  const expectedEmail = ctx.args[1]?.trim().toLowerCase();
+  const expectedEmail = String(ctx.getVariable('generated_email') ?? '').trim().toLowerCase();
   if (!targetUrl) throw new Error('A target URL is required to select a browser tab');
 
   let target: URL;
@@ -24,6 +24,10 @@ export async function selectRunOwnedBrowserTab(ctx: WalnutWebContext) {
   const isTempMailTarget = target.hostname === 'temp-mail.io' || target.hostname.endsWith('.temp-mail.io');
   const matches: number[] = [];
 
+  if (isTempMailTarget && !expectedEmail) {
+    throw new Error('The Temp-Mail tab can only be selected when this run\'s generated email is available');
+  }
+
   for (let index = 0; index < pages.length; index += 1) {
     const candidate = pages[index];
     let candidateUrl: URL;
@@ -34,7 +38,6 @@ export async function selectRunOwnedBrowserTab(ctx: WalnutWebContext) {
     }
 
     if (isTempMailTarget) {
-      if (!expectedEmail) throw new Error('The Temp-Mail tab can only be selected when this run\'s generated email is available');
       if (candidateUrl.hostname !== target.hostname && !candidateUrl.hostname.endsWith(`.${target.hostname}`)) continue;
       const addressInput = candidate.locator('input[aria-label="Your temporary email"], input#email').first();
       if (await addressInput.count() === 0) continue;
@@ -50,7 +53,7 @@ export async function selectRunOwnedBrowserTab(ctx: WalnutWebContext) {
   }
 
   if (matches.length !== 1) {
-    const targetName = isTempMailTarget ? `Temp-Mail inbox ${expectedEmail ?? '(email unavailable)'}` : `HHCS Doctor form for ${target.hostname}`;
+    const targetName = isTempMailTarget ? `Temp-Mail inbox ${expectedEmail || '(email unavailable)'}` : `HHCS Doctor form for ${target.hostname}`;
     throw new Error(`Expected exactly one open tab for ${targetName}, found ${matches.length}; no tab was changed`);
   }
 
