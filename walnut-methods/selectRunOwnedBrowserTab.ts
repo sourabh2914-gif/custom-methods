@@ -59,7 +59,7 @@ export async function selectRunOwnedBrowserTab(ctx: WalnutWebContext) {
 
   const index = matches[0];
   const selectedPage = pages[index];
-  ctx.setVariable(isTempMailTarget ? 'temp_mail_tab_index' : 'hhcs_tab_index', String(index));
+  ctx.setVariable(isTempMailTarget ? 'temp_mail_tab_index_live' : 'hhcs_tab_index_live', String(index));
   await ctx.switchToTab(index);
   ctx.page = selectedPage;
   await selectedPage.bringToFront();
